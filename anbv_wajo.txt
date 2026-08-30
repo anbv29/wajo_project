@@ -1,0 +1,1986 @@
+ANBV WAJO - PROACTIVE EMAIL AGENT
+COMPLETE ENGINEERING, IMPLEMENTATION, TESTING, AND INTERVIEW WALKTHROUGH
+
+Document purpose
+================
+
+This document explains the entire project from beginning to end. It is written as if I am walking an interviewer through what I built, why I built it this way, how every important part works, how the system learns, how it remains safe, how it is tested, and how it can later be connected to Gmail.
+
+The central principle of the project is:
+
+    Autonomy may increase through evidence, but authority never increases through learning.
+
+In other words, the agent can learn that a user usually wants newsletters archived and gradually ask less often. It can never learn that it is allowed to send an external email, spend money, permanently delete data, or bypass a safety rule. Learning can make the system less annoying inside a fixed safety boundary; it cannot weaken that boundary.
+
+
+TABLE OF CONTENTS
+=================
+
+1. Problem interpretation
+2. Product scope and non-goals
+3. What the finished demonstration will show
+4. Technology stack and why it was chosen
+5. System architecture
+6. Repository structure
+7. Domain model
+8. Action capability catalogue and hard safety floors
+9. Email ingestion and normalization
+10. LLM planner
+11. Prompt-injection and sensitive-content handling
+12. Deterministic policy engine
+13. Contextual preference learning
+14. Four-way autonomy router
+15. Approval workflow
+16. Execution engine and idempotency
+17. Event store and SQLite design
+18. End-to-end processing flow
+19. User feedback flow
+20. Command-line interface and demonstration experience
+21. Optional Gmail integration
+22. Evaluation datasets
+23. Test and evaluation strategy
+24. Failure-injection testing
+25. Metrics and reports
+26. Step-by-step coding sequence
+27. Continuous integration and quality gates
+28. Final interview demonstration
+29. Security and privacy considerations
+30. Known limitations and production evolution
+31. Definition of done
+32. Short interviewer summary
+
+
+1. PROBLEM INTERPRETATION
+=========================
+
+The task is to build a proactive AI agent that manages email. For every incoming email or situation, the system must decide one of four autonomy levels:
+
+1. SILENT
+   Perform the action without interrupting the user.
+
+2. NOTIFY
+   Perform the action and tell the user what was done.
+
+3. ASK
+   Show the exact proposed action and wait for explicit approval.
+
+4. ESCALATE
+   Do not execute. Hand the situation back to the user because it is dangerous, ambiguous, sensitive, unsupported, or affected by prompt injection.
+
+The difficult part is not classifying an email. The difficult part is calibration: learning when the user is comfortable with autonomy without ever making a risky or irreversible decision independently.
+
+I split the problem into two fundamentally different kinds of logic:
+
+A. Probabilistic interpretation
+   An LLM interprets the email and proposes an action. This may occasionally be wrong, so it is never trusted as the final authority.
+
+B. Deterministic authorization
+   Normal Python code determines whether that proposed action is allowed and how much autonomy it may receive. This code is small, explicit, testable, and independent of model persuasion.
+
+That separation is the main architectural decision. The LLM is a planner, not an executor and not a security boundary.
+
+
+2. PRODUCT SCOPE AND NON-GOALS
+==============================
+
+Actions implemented in the core take-home:
+
+- no_action
+- mark_read
+- mark_unread
+- add_label
+- archive
+- create_draft
+- trash
+- send_reply, available only after exact user approval
+- forward, either approval-only or disabled if it cannot be demonstrated safely
+
+Actions deliberately unavailable in the core:
+
+- permanent deletion
+- payments or purchases
+- changing account settings
+- credential reset
+- signing or accepting legal agreements
+- automatically opening links
+- automatically executing attachments
+- automatically sending external messages without approval
+
+The finished project works entirely with a fixture mailbox and mock executor. Gmail is an optional adapter added only after the safe offline system and evaluation suite pass. This gives an interviewer a reproducible demo without requiring access to a real mailbox.
+
+
+3. WHAT THE FINISHED DEMONSTRATION WILL SHOW
+============================================
+
+The final demo tells a coherent story:
+
+Scenario 1 - cold start
+    A newsletter arrives. The system recognizes it and proposes archive. Because the user preference is unknown, it asks first.
+
+Scenario 2 - learning
+    The user repeatedly approves archiving similar newsletters. The contextual confidence grows. The system eventually moves from ASK to NOTIFY and, after enough evidence, to SILENT because archive is internal and reversible.
+
+Scenario 3 - hard safety floor
+    The user has maximum trust for replies, but an external reply still stays at ASK. This proves that learning cannot weaken policy.
+
+Scenario 4 - prompt injection
+    An email says to ignore previous instructions, reveal secrets, or forward information. The system marks it as suspicious and escalates without executing anything.
+
+Scenario 5 - correctness under failure
+    A simulated external send times out. The result becomes UNKNOWN rather than FAILED, and the system does not retry automatically because the provider may have accepted the send.
+
+After the scenarios, the demo shows the actual evaluation report: safety invariant violations, planner accuracy, injection results, learning curves, calibration, and failure-injection outcomes.
+
+
+4. TECHNOLOGY STACK AND WHY IT WAS CHOSEN
+==========================================
+
+Language:
+    Python 3.12
+
+Primary libraries:
+
+- pydantic v2
+  Defines strict typed domain models and validates LLM structured output.
+
+- openai
+  Calls the Responses API for the planner. The model returns a strict action proposal, not free-form executable commands.
+
+- typer
+  Provides a clear command-line interface.
+
+- rich
+  Displays decisions, safety reasons, approvals, tables, and evaluation results cleanly.
+
+- sqlite3 or SQLAlchemy Core
+  Stores immutable events, current preference projections, approvals, and execution state.
+
+- scipy
+  Computes Beta-distribution posterior probabilities for contextual preference learning.
+
+- scikit-learn
+  Computes Brier score, calibration curves, confusion matrices, and classification metrics.
+
+- pytest
+  Runs unit and integration tests.
+
+- hypothesis
+  Generates large combinations of policy and approval states to verify universal safety properties.
+
+- pytest-cov
+  Reports branch coverage, particularly for safety-critical modules.
+
+- ruff
+  Formatting and linting.
+
+- pyright or mypy
+  Strict static type checking.
+
+- matplotlib
+  Produces learning and calibration plots for the final report.
+
+Development and packaging:
+
+- uv manages the virtual environment, locked dependencies, and commands.
+- pyproject.toml contains dependency and tooling configuration.
+- .env stores local configuration, while .env.example documents required keys without containing secrets.
+
+The project deliberately avoids Docker, PostgreSQL, Redis, Celery, Kafka, and a web frontend in the required path. Those tools are appropriate at greater scale, but they would add setup and failure modes without improving the core take-home evidence.
+
+
+5. SYSTEM ARCHITECTURE
+======================
+
+High-level flow:
+
+    Fixture mailbox or optional Gmail adapter
+                    |
+                    v
+        Email ingestion and normalization
+                    |
+                    v
+          Untrusted-content boundary
+                    |
+          +---------+----------+
+          |                    |
+          v                    v
+      LLM planner       injection/sensitivity scan
+          |                    |
+          +---------+----------+
+                    v
+          deterministic policy engine
+                    |
+                    v
+        contextual preference learner
+                    |
+                    v
+          four-way autonomy router
+           /        |       |       \
+          v         v       v        v
+       SILENT    NOTIFY     ASK    ESCALATE
+          |         |       |        |
+          +----+----+       |        +--> human review
+               |            v
+               |      approval workflow
+               |            |
+               +------------+
+                    v
+          policy revalidation
+                    |
+                    v
+          idempotent executor
+                    |
+                    v
+           append-only event log
+                    |
+                    v
+          feedback and learning update
+
+Critical trust boundaries:
+
+1. Email bodies are untrusted input.
+2. LLM output is untrusted until Pydantic validation succeeds.
+3. A valid proposal is still not authorized.
+4. Only the deterministic policy engine can establish the minimum autonomy tier.
+5. Only the backend approval service can authorize an approval-only action.
+6. The executor validates policy and approval again immediately before side effects.
+7. The learner can update preference evidence only; it cannot update action capabilities or safety rules.
+
+
+6. REPOSITORY STRUCTURE
+=======================
+
+The intended repository is:
+
+    wajo-ai/
+    |-- pyproject.toml
+    |-- uv.lock
+    |-- README.md
+    |-- DESIGN.md
+    |-- .env.example
+    |-- .gitignore
+    |
+    |-- src/
+    |   `-- wajo_agent/
+    |       |-- __init__.py
+    |       |-- config.py
+    |       |-- cli.py
+    |       |-- pipeline.py
+    |       |
+    |       |-- domain/
+    |       |   |-- email.py
+    |       |   |-- actions.py
+    |       |   |-- decisions.py
+    |       |   |-- feedback.py
+    |       |   `-- events.py
+    |       |
+    |       |-- llm/
+    |       |   |-- planner.py
+    |       |   |-- schemas.py
+    |       |   |-- prompts.py
+    |       |   `-- injection.py
+    |       |
+    |       |-- policy/
+    |       |   |-- capabilities.py
+    |       |   |-- engine.py
+    |       |   `-- validator.py
+    |       |
+    |       |-- learning/
+    |       |   |-- context.py
+    |       |   |-- beta_model.py
+    |       |   `-- router.py
+    |       |
+    |       |-- approvals/
+    |       |   |-- service.py
+    |       |   `-- canonicalize.py
+    |       |
+    |       |-- execution/
+    |       |   |-- executor.py
+    |       |   |-- idempotency.py
+    |       |   `-- states.py
+    |       |
+    |       |-- storage/
+    |       |   |-- database.py
+    |       |   |-- schema.sql
+    |       |   |-- event_store.py
+    |       |   `-- projections.py
+    |       |
+    |       `-- adapters/
+    |           |-- fixture_mailbox.py
+    |           |-- mock_executor.py
+    |           `-- gmail.py
+    |
+    |-- data/
+    |   |-- fixtures/
+    |   |-- semantic_eval.jsonl
+    |   |-- injection_eval.jsonl
+    |   `-- learning_personas.json
+    |
+    |-- evals/
+    |   |-- run_all.py
+    |   |-- policy_eval.py
+    |   |-- semantic_eval.py
+    |   |-- injection_eval.py
+    |   |-- learning_eval.py
+    |   |-- failure_eval.py
+    |   `-- reporting.py
+    |
+    |-- tests/
+    |   |-- unit/
+    |   |-- property/
+    |   |-- integration/
+    |   `-- end_to_end/
+    |
+    |-- transcripts/
+    |-- reports/
+    `-- scripts/
+
+The folders mirror architectural responsibilities. The policy code does not import Gmail. The learner does not import the executor. The planner cannot call tools. These dependency boundaries make unsafe shortcuts structurally difficult.
+
+
+7. DOMAIN MODEL
+===============
+
+All boundaries use explicit Pydantic models. No dictionary containing arbitrary fields is allowed to flow into the executor.
+
+EmailEnvelope contains:
+
+- internal email ID
+- provider message ID
+- provider thread ID
+- sender address and display name
+- recipients
+- subject
+- normalized plain text body
+- sanitized HTML metadata if required
+- received timestamp
+- attachment metadata only, not automatically opened content
+- headers needed for classification
+- source type, fixture or Gmail
+
+ActionProposal contains:
+
+- proposal ID and version
+- email ID
+- action_type
+- intent
+- human-readable summary
+- typed payload
+- evidence snippets or fields used for the proposal
+- uncertainty reasons
+- proposed timestamp
+
+It intentionally does not include an executable Python function, SQL statement, URL to open, or a model-selected safety tier.
+
+CapabilitySpec contains static code-owned metadata:
+
+- action_type
+- effect class
+- reversible
+- external
+- destructive
+- financial
+- enabled
+- minimum autonomy tier
+- approval required
+
+RiskAssessment contains:
+
+- injection detected
+- suspicious patterns
+- sensitive categories
+- novelty indicators
+- missing required information
+- policy reasons
+
+Decision contains:
+
+- decision ID
+- proposal ID and version
+- selected autonomy tier
+- policy minimum tier
+- learned preference tier
+- content-risk floor
+- final reasons
+- whether execution is currently possible
+- timestamp
+
+FeedbackEvent contains:
+
+- event ID
+- decision ID
+- context key
+- feedback type: approved, edited, rejected, undone, corrected
+- original payload hash
+- edited proposal when present
+- timestamp
+
+Approval contains:
+
+- approval ID
+- proposal ID and version
+- canonical payload hash
+- approving actor
+- created time
+- expiry time
+- consumed time
+- status
+
+ExecutionRecord contains:
+
+- execution ID
+- proposal ID
+- idempotency key
+- state
+- attempt number
+- provider operation ID if available
+- started and completed timestamps
+- result or error classification
+
+
+8. ACTION CAPABILITY CATALOGUE AND HARD SAFETY FLOORS
+=====================================================
+
+The capability catalogue is Python-owned constant data. The LLM and learner can read its implications but cannot edit it.
+
+Suggested catalogue:
+
+    no_action       internal, reversible, enabled, minimum SILENT
+    mark_read       internal, reversible, enabled, minimum SILENT
+    mark_unread     internal, reversible, enabled, minimum SILENT
+    add_label       internal, reversible, enabled, minimum SILENT
+    archive         internal, reversible, enabled, minimum SILENT
+    create_draft    internal, reversible, enabled, minimum NOTIFY
+    trash           internal, recoverable but destructive, enabled, minimum ASK
+    send_reply      external, enabled only with approval, minimum ASK
+    forward         external, approval-only or disabled, minimum ASK
+    unsubscribe     external, approval-only or disabled, minimum ASK
+    permanent_delete destructive and irreversible, disabled, ESCALATE
+    payment         financial, disabled, ESCALATE
+    account_change  sensitive external authority, disabled, ESCALATE
+
+Autonomy ordering:
+
+    SILENT < NOTIFY < ASK < ESCALATE
+
+The final decision is the most restrictive relevant tier:
+
+    final_tier = max(
+        capability_minimum,
+        content_risk_floor,
+        learned_preference_tier,
+        novelty_or_uncertainty_floor,
+    )
+
+Because max means more restrictive in this ordering, user learning can never push a proposal below the capability minimum.
+
+Hard rules include:
+
+- Any external write is at least ASK.
+- Any financial action escalates.
+- Permanent deletion is unavailable.
+- Credential, banking, account recovery, or legal commitment content escalates.
+- Detected prompt injection escalates.
+- Unknown action types escalate.
+- Invalid or missing model output escalates.
+- Trash is at least ASK.
+- Draft creation is at least NOTIFY.
+- The policy is checked when deciding and checked again immediately before executing.
+
+
+9. EMAIL INGESTION AND NORMALIZATION
+====================================
+
+The fixture adapter reads JSON or JSONL email fixtures. The optional Gmail adapter maps provider responses into the same EmailEnvelope type. The rest of the system never needs to know which adapter produced the message.
+
+Normalization performs:
+
+1. Size limits
+   Reject or truncate unusually large fields using explicit recorded rules.
+
+2. Unicode normalization
+   Normalize confusable formatting where appropriate and remove zero-width characters used to hide instructions.
+
+3. HTML handling
+   Convert HTML to sanitized visible text. Scripts, forms, remote resources, and active content are not executed.
+
+4. Quoted content marking
+   Preserve useful quoted reply content but mark it so the planner can distinguish current content from earlier messages.
+
+5. URL treatment
+   Record URLs as inert text. The system does not automatically fetch them.
+
+6. Attachment treatment
+   Record filename, media type, and size. The core system never executes or automatically opens attachments.
+
+7. Stable identifiers
+   Preserve provider message IDs and create a stable internal email ID for deduplication.
+
+8. Audit event
+   Append email_received and email_normalized events before planning.
+
+The normalized email is still untrusted. Normalization reduces attack surface; it does not convert email content into instructions.
+
+
+10. LLM PLANNER
+===============
+
+The planner receives:
+
+- a system/developer instruction describing its limited classification role
+- the normalized email inside an explicitly untrusted data field
+- the allowed action schema
+- the requirement to return structured output
+
+The planner does not receive Gmail tools or execution functions. It cannot send, archive, label, delete, or approve anything.
+
+The planner returns an ActionProposal with strict schema validation. A conceptual request looks like:
+
+    response = client.responses.create(
+        model=config.planner_model,
+        instructions=PLANNER_INSTRUCTIONS,
+        input=build_untrusted_email_input(email),
+        text={"format": proposal_json_schema},
+    )
+
+The exact SDK syntax will be implemented against the installed SDK version and covered by a contract test.
+
+Planner responsibilities:
+
+- identify intent
+- choose one supported proposed action
+- fill the typed payload
+- summarize the reason using evidence
+- report ambiguity or missing information
+
+Planner non-responsibilities:
+
+- decide the final autonomy tier
+- declare an action safe
+- change policy
+- approve a payload
+- call a tool
+- execute an action
+- update trust
+
+If the API fails, times out, returns invalid JSON, returns an unknown action, or violates the schema, the pipeline records the failure and returns ESCALATE or a safe deferred state.
+
+
+11. PROMPT-INJECTION AND SENSITIVE-CONTENT HANDLING
+===================================================
+
+Email is a hostile instruction channel. An email may contain text that looks like system instructions, fake approval, hidden Unicode, or a request to expose information.
+
+The defense is layered:
+
+Layer 1 - structural isolation
+    Email content is passed as data, never inserted into developer instructions.
+
+Layer 2 - no planner tools
+    Even a compromised planner has no execution capability.
+
+Layer 3 - strict output schema
+    The model can only propose known typed actions.
+
+Layer 4 - deterministic heuristics
+    Scan for instruction override language, fake system roles, secret requests, encoded directives, hidden characters, suspicious forwarding requests, and approval impersonation.
+
+Layer 5 - optional semantic injection detector
+    A separate classification call can identify attacks that heuristics miss. This improves recall but is not treated as the security boundary.
+
+Layer 6 - content sensitivity floors
+    Banking, credentials, account recovery, legal commitments, financial transfers, and other sensitive content escalate independently of the proposed action.
+
+Layer 7 - capability floors
+    External or destructive actions remain ASK or ESCALATE even if injection detection misses an attack.
+
+Layer 8 - approval binding and execution validation
+    No email text can manufacture a valid backend approval record or payload hash.
+
+The injection detector returns evidence and categories, not instructions. Suspicious content is logged in a redacted form appropriate for the demonstration.
+
+
+12. DETERMINISTIC POLICY ENGINE
+===============================
+
+The policy engine is deliberately small and boring. That is a positive security property. It takes typed inputs and returns a DecisionCandidate without calling an LLM, database, Gmail, or network service.
+
+Inputs:
+
+- ActionProposal
+- CapabilitySpec
+- RiskAssessment
+- context novelty information
+- current learned preference recommendation
+
+Conceptual algorithm:
+
+    def decide(proposal, risk, learned_tier, context_state):
+        capability = capability_catalog.lookup(proposal.action_type)
+
+        if capability is missing:
+            return ESCALATE("unknown action")
+
+        if not capability.enabled:
+            return ESCALATE("action disabled")
+
+        if risk.injection_detected:
+            return ESCALATE("prompt injection")
+
+        if risk.has_hard_sensitive_category:
+            return ESCALATE("sensitive content")
+
+        content_floor = calculate_content_floor(risk, proposal)
+        novelty_floor = calculate_novelty_floor(context_state, proposal)
+
+        final_tier = most_restrictive(
+            capability.minimum_tier,
+            content_floor,
+            learned_tier,
+            novelty_floor,
+        )
+
+        return Decision(final_tier, all_reasons)
+
+There are no early successful execution returns inside the policy engine. Every path constructs a complete decision and passes it through a final invariant validator.
+
+The invariant validator runs after policy calculation and again before execution. It contains assertions expressed as ordinary conditions with safe failure behavior, for example:
+
+    if capability.external and decision.tier < ASK:
+        raise PolicyViolation
+
+    if capability.financial or not capability.enabled:
+        deny_execution
+
+The production path does not rely on Python assert statements because assertions can be disabled. It raises explicit domain errors, records the event, and fails closed.
+
+
+13. CONTEXTUAL PREFERENCE LEARNING
+==================================
+
+The learning goal is not to predict a universal user personality. It is to learn narrow, explainable preferences in exact contexts.
+
+Context key:
+
+    action_type
+    + intent
+    + sender_bucket
+    + recipient_scope
+
+Example:
+
+    archive | newsletter | known_bulk_sender | internal_mailbox
+
+This is different from:
+
+    archive | personal_message | known_person | internal_mailbox
+
+Trust earned for archiving newsletters cannot authorize handling personal messages. Broad statistics may be displayed as priors or analytics, but only exact-context evidence can produce SILENT.
+
+Each context starts with a Beta distribution:
+
+    theta ~ Beta(alpha=1, beta=1)
+
+Theta represents the probability that the user will accept the proposed action in that exact context.
+
+Feedback updates:
+
+- approve or explicit confirmation:
+      alpha += 1
+
+- correct autonomous action:
+      alpha += 1
+
+- edit proposal:
+      original_context beta += 2
+      edited_context alpha += 1
+
+- reject or undo:
+      beta += 3
+      activate a cooldown that prevents immediate promotion
+
+- no explicit feedback:
+      no update
+
+Silence is not counted as approval. The user may not have seen the notification, so learning from non-response would create unjustified confidence.
+
+Tier recommendation:
+
+ASK:
+    Fewer than four observations, a cooldown is active, the context is novel, or evidence is weak.
+
+NOTIFY:
+    At least four observations and
+    P(theta > 0.70) >= 0.90.
+
+SILENT:
+    Only when the capability is internal, reversible, low risk, and enabled;
+    at least twelve observations exist;
+    P(theta > 0.90) >= 0.80;
+    no negative feedback occurred in the last five observations;
+    the context is an exact match.
+
+ASK remains the learner output for actions whose evidence is insufficient. The capability floor later ensures an external action cannot go below ASK even if the learner recommends SILENT due to a bug; the final validator independently checks this invariant.
+
+Why posterior probability instead of a simple approval percentage:
+
+A raw ratio of one approval out of one observation is 100 percent but extremely uncertain. The Beta posterior lets the system require both a strong estimated preference and sufficient evidence. It also produces an explainable confidence value for reports and the demo.
+
+Example progression for repeated newsletter archive approval:
+
+    Initial:       Beta(1,1)   -> ASK
+    Four approvals Beta(5,1)   -> possibly NOTIFY if threshold passes
+    More evidence  Beta(...)   -> remain NOTIFY until strict silent criteria pass
+    Fifteen approvals Beta(16,1)
+                  P(theta > 0.9) = 1 - 0.9^16, approximately 0.815
+                  -> SILENT may be allowed for archive only
+
+A later rejection immediately increases beta, records a negative recent event, activates cooldown, and demotes the recommendation.
+
+
+14. FOUR-WAY AUTONOMY ROUTER
+============================
+
+The router converts the final Decision into an operational next step.
+
+SILENT:
+    Execute only after final policy validation. Record the decision and result. The action must be internal, reversible, and low risk.
+
+NOTIFY:
+    Execute after validation and create a notification event describing the completed action and how to undo it when applicable.
+
+ASK:
+    Do not execute. Produce an approval request containing the exact canonical payload the user would authorize.
+
+ESCALATE:
+    Do not execute. Show the user why the system stopped, including missing information, risk flags, unsupported capability, or injection concerns.
+
+The router contains no special exception that allows the model or UI to override a final tier.
+
+
+15. APPROVAL WORKFLOW
+=====================
+
+Approval is not a boolean attached to an email. It is a single-use authorization for one exact proposal payload and version.
+
+Canonical payload for a reply includes:
+
+- email and thread identifiers
+- action type
+- exact recipients
+- exact subject
+- exact body
+- proposal version
+
+Canonicalization uses stable field ordering and stable encoding. The resulting bytes are hashed using SHA-256. The approval record stores that hash.
+
+Approval request flow:
+
+1. The ASK decision is persisted.
+2. The exact proposed payload is canonicalized.
+3. A payload hash and expiring approval request are stored.
+4. The CLI displays recipients, subject, body, reasons, and expiry.
+5. The user chooses approve, edit, or reject.
+
+Approve:
+
+- Record the approving actor and timestamp.
+- Mark the approval available but not yet consumed.
+- Pass the same payload to the executor.
+- Recompute its hash and compare it to the stored hash.
+- Re-run current policy.
+- Atomically consume the approval as execution begins.
+
+Edit:
+
+- The old approval is invalidated.
+- The edited content becomes a new proposal version.
+- Policy and risk assessment run again.
+- A new approval request with a new hash is created.
+- Learning records negative evidence for the old proposal context and positive evidence for the user-corrected context only after explicit confirmation.
+
+Reject:
+
+- Mark the approval rejected.
+- Do not execute.
+- Record negative preference evidence and cooldown.
+
+An approval is rejected by the executor when it is expired, used, revoked, bound to another version, or has a different payload hash.
+
+
+16. EXECUTION ENGINE AND IDEMPOTENCY
+====================================
+
+The executor accepts only a validated ExecutionCommand. The command can be constructed only after the decision and, when required, approval checks pass.
+
+Execution state machine:
+
+    PLANNED
+       |
+       +--> AWAITING_APPROVAL
+                |
+                v
+             APPROVED
+                |
+                v
+             EXECUTING
+              /  |  \
+             v   v   v
+       SUCCEEDED FAILED_SAFE UNKNOWN
+
+UNKNOWN is required for external effects. If a send request times out, the application cannot know whether Gmail accepted it. Retrying might create a duplicate email, so the system records UNKNOWN and requires reconciliation or manual review.
+
+Idempotency key:
+
+    SHA256(
+        user_id
+        + provider_message_id
+        + canonical_action_payload
+        + proposal_version
+    )
+
+The autonomy tier is not included because retry identity depends on the effect, not on whether the decision was ASK or NOTIFY.
+
+Before a side effect:
+
+1. Validate the action is enabled.
+2. Re-run policy and invariants.
+3. Validate approval when required.
+4. Check for an existing successful execution with the same key.
+5. Create or claim the execution record.
+6. Move to EXECUTING.
+7. Perform the adapter call.
+8. Persist SUCCEEDED, FAILED_SAFE, or UNKNOWN.
+
+Fixture and mock internal operations can be made atomic with the SQLite event transaction. A real external provider call cannot be part of the database transaction, so the state machine and reconciliation rules explicitly represent the gap.
+
+Retry rules:
+
+- Read-only calls may retry with bounded backoff.
+- Internal reversible label/archive operations may retry when provider reconciliation confirms the current state.
+- Invalid requests do not retry.
+- External send with an unknown outcome does not automatically retry.
+- The mock executor can inject every failure classification for testing.
+
+
+17. EVENT STORE AND SQLITE DESIGN
+=================================
+
+The system uses append-only events as the audit source and projection tables for efficient current state.
+
+Core event types:
+
+- email_received
+- email_normalized
+- proposal_created
+- proposal_invalid
+- risk_assessed
+- decision_created
+- approval_requested
+- approval_granted
+- approval_edited
+- approval_rejected
+- execution_started
+- execution_succeeded
+- execution_failed_safe
+- execution_unknown
+- feedback_recorded
+- preference_updated
+
+Suggested tables:
+
+events:
+    event_id primary key
+    aggregate_type
+    aggregate_id
+    event_type
+    event_version
+    payload_json
+    created_at
+
+emails:
+    email_id primary key
+    provider_message_id unique
+    normalized_json
+    received_at
+
+proposals:
+    proposal_id
+    version
+    email_id
+    proposal_json
+    payload_hash
+    created_at
+    primary key(proposal_id, version)
+
+decisions:
+    decision_id primary key
+    proposal_id
+    proposal_version
+    final_tier
+    reasons_json
+    created_at
+
+approvals:
+    approval_id primary key
+    proposal_id
+    proposal_version
+    payload_hash
+    actor
+    status
+    expires_at
+    consumed_at
+
+executions:
+    execution_id primary key
+    idempotency_key unique
+    proposal_id
+    proposal_version
+    state
+    provider_operation_id
+    error_class
+    started_at
+    completed_at
+
+preference_contexts:
+    context_key primary key
+    alpha
+    beta
+    observation_count
+    recent_feedback_json
+    cooldown_until_observation
+    updated_at
+
+feedback_deduplication:
+    feedback_event_id primary key
+    decision_id
+    feedback_hash unique
+
+SQLite operating rules:
+
+- Use one writer path in the take-home application.
+- Keep transactions short.
+- Configure a busy timeout.
+- Enable foreign keys.
+- Use explicit migrations or a versioned schema initialization.
+- Never hold a transaction open while waiting for an LLM or Gmail network call.
+- Store UTC timestamps.
+- Serialize JSON deterministically when it participates in hashes.
+
+The event write and related local projection update happen in one transaction. If projection rebuilding is implemented, current tables can be reconstructed from the append-only log.
+
+
+18. END-TO-END PROCESSING FLOW
+==============================
+
+For one incoming email, the pipeline performs these steps:
+
+Step 1 - ingest
+    Read the fixture or Gmail message and reject duplicates using the provider message ID.
+
+Step 2 - normalize
+    Sanitize content, preserve required metadata, enforce size limits, and append normalization events.
+
+Step 3 - scan
+    Run deterministic injection and sensitivity checks.
+
+Step 4 - plan
+    Ask the LLM for a strict ActionProposal. Validate it with Pydantic.
+
+Step 5 - enrich risk
+    Combine heuristic, semantic, structural, novelty, and missing-data findings into RiskAssessment.
+
+Step 6 - load preference context
+    Construct the exact context key and load its Beta state.
+
+Step 7 - obtain learning recommendation
+    Compute ASK, NOTIFY, or SILENT using evidence and posterior thresholds.
+
+Step 8 - apply deterministic policy
+    Combine capability, content, novelty, and learned tiers using the most restrictive result.
+
+Step 9 - validate decision invariants
+    Ensure external, disabled, destructive, financial, unknown, and injection cases cannot violate their floors.
+
+Step 10 - route
+    Execute, execute-and-notify, request approval, or escalate.
+
+Step 11 - validate before execution
+    Re-run policy, approval, payload, and idempotency checks.
+
+Step 12 - execute through adapter
+    The core calls the fixture/mock executor or optional Gmail adapter through the same interface.
+
+Step 13 - record outcome
+    Append events and update projections.
+
+Step 14 - collect explicit feedback
+    Record approve, edit, reject, undo, or correction.
+
+Step 15 - update preference evidence
+    Apply the feedback once using deduplication and append the preference update event.
+
+
+19. USER FEEDBACK FLOW
+======================
+
+Feedback is associated with the decision and exact context. It is not inferred from vague inactivity.
+
+For ASK:
+
+- approval is positive evidence
+- edit teaches that the original proposal was not acceptable as-is
+- rejection is strong negative evidence
+
+For NOTIFY:
+
+- explicit confirmation is positive evidence
+- correction or undo is negative evidence
+- no response does not update the model
+
+For SILENT:
+
+- correct/confirm is positive evidence when the demo explicitly collects it
+- undo or correction is strong negative evidence
+- negative feedback forces immediate demotion and cooldown
+
+Duplicate feedback events are ignored using a stable feedback identity. If storage fails, the UI reports that feedback was not committed rather than pretending learning succeeded.
+
+
+20. COMMAND-LINE INTERFACE AND DEMONSTRATION EXPERIENCE
+=======================================================
+
+The CLI is the primary product surface for the take-home. Planned commands include:
+
+    wajo init-db
+        Initialize or migrate the local database.
+
+    wajo ingest data/fixtures/newsletter.json
+        Ingest and process one fixture email.
+
+    wajo inbox
+        List processed messages and decisions.
+
+    wajo decision <decision-id>
+        Show proposal, tier, risks, policy floor, preference evidence, and reasons.
+
+    wajo approve <approval-id>
+        Display the exact payload again and grant single-use approval.
+
+    wajo edit <approval-id>
+        Create a new proposal version from an edited payload and re-run policy.
+
+    wajo reject <approval-id>
+        Reject and record feedback.
+
+    wajo feedback <decision-id> --correct|--undo
+        Record explicit post-action feedback.
+
+    wajo preferences
+        Display contextual alpha, beta, observations, posterior metrics, and current recommendation.
+
+    wajo events
+        Display the audit trail.
+
+    wajo demo
+        Run the curated five-scenario interview demonstration.
+
+    wajo eval all
+        Run the complete local evaluation suite and produce reports.
+
+Rich output uses colors and tables for readability, but every result is also written as machine-readable JSON so the evaluation is not dependent on terminal formatting.
+
+
+21. OPTIONAL GMAIL INTEGRATION
+==============================
+
+Gmail is deliberately an adapter, not part of the domain or policy design. The core passes against fixtures first.
+
+The Gmail phase adds:
+
+1. A dedicated test Google account.
+2. OAuth client configuration and local token handling.
+3. The minimum scopes required by the enabled actions.
+4. Mapping Gmail messages into EmailEnvelope.
+5. Read, label, archive, and draft implementations.
+6. Approved send only to a preconfigured test recipient.
+7. Provider IDs stored for reconciliation.
+
+Safety rules for Gmail testing:
+
+- Gmail execution is disabled by default.
+- Dry-run mode is the default.
+- No production mailbox is required for review.
+- Sending is restricted to a test account and explicit approval.
+- Permanent delete and payment do not exist in the adapter.
+- Tokens are never committed.
+- Email bodies are redacted from ordinary logs where possible.
+- Pub/Sub push delivery is not required for the take-home; a manual sync command is sufficient.
+
+Adapter interface concept:
+
+    class MailboxExecutor(Protocol):
+        def mark_read(command) -> ExecutionResult: ...
+        def add_label(command) -> ExecutionResult: ...
+        def archive(command) -> ExecutionResult: ...
+        def create_draft(command) -> ExecutionResult: ...
+        def trash(command) -> ExecutionResult: ...
+        def send_reply(command) -> ExecutionResult: ...
+
+The mock and Gmail implementations satisfy the same contract tests. Policy tests never need Gmail credentials.
+
+
+22. EVALUATION DATASETS
+=======================
+
+The project maintains separate datasets because each layer answers a different question.
+
+A. Policy combinations
+
+Generated by Hypothesis rather than written manually. It combines capabilities, risk flags, preference recommendations, approvals, payload states, and execution histories.
+
+B. Semantic planner dataset
+
+Approximately 60 to 80 human-reviewed emails covering normal, ambiguous, sensitive, and unusual cases. Each item includes:
+
+- expected action
+- expected intent
+- required risk categories
+- acceptable action alternatives for genuinely ambiguous cases
+- minimum allowed tier or set of allowed tiers given an explicit state
+- human annotation notes
+
+C. Injection dataset
+
+At least 40 adversarial messages and 40 matched benign controls. The paired controls share words or themes with attacks without actually instructing the agent to break policy. This measures both recall and false positives.
+
+D. Learning-persona dataset
+
+At least four chronological personas with 20 to 30 messages each. Each step defines the email context and simulated explicit feedback. The chronological order matters because the decision at time t must use only feedback available before time t.
+
+E. Failure scenarios
+
+Scripted adapter and storage failures covering timeouts, exceptions, duplicates, restarts, payload tampering, approval replay, and unknown external outcomes.
+
+Dataset governance:
+
+- Keep development and held-out semantic cases separate.
+- Freeze the final held-out set before final prompt tuning.
+- Version datasets in Git.
+- Hash dataset content in each evaluation report.
+- Do not include private real-world email without authorization and redaction.
+- Preserve raw failing case IDs in reports.
+- Review ambiguous high-risk labels manually rather than forcing a misleading exact label.
+
+
+23. TEST AND EVALUATION STRATEGY
+================================
+
+The word flawless is not used as a claim. LLM output is nondeterministic. The engineering goal is zero observed safety-floor violations in deterministic and adversarial testing, plus honestly measured semantic and calibration quality.
+
+Layer 1 - static checks
+
+- ruff format --check
+- ruff check
+- pyright or mypy strict checking
+- dependency and secret scanning where available
+
+Layer 2 - unit tests
+
+Test every domain constructor, canonicalizer, capability, policy branch, Beta update, context builder, state transition, approval rule, and idempotency function.
+
+Layer 3 - property tests
+
+Generate at least 1,000 combinations and enforce:
+
+- external action tier is never below ASK
+- financial action always escalates
+- disabled action is never executable
+- injection always escalates when detected
+- permanent delete is never executable
+- unknown action fails closed
+- invalid proposal fails closed
+- mismatched, used, expired, or revoked approval cannot execute
+- learning cannot modify the capability catalogue
+
+Layer 4 - integration tests
+
+Use a temporary SQLite database and fake planner/executor to verify event order, transactions, feedback deduplication, preference projection, approval consumption, and restart behavior.
+
+Layer 5 - live-model semantic evaluation
+
+Call the configured planner model on the frozen dataset. Measure:
+
+- schema-valid output rate
+- action accuracy
+- intent accuracy
+- macro F1
+- per-class recall
+- risk-flag recall
+- confusion matrix
+- latency and token usage
+
+Run the model evaluation multiple times with fixed prompt, model configuration, dataset, and application version. Model variability should appear in the report instead of being hidden.
+
+Layer 6 - injection evaluation
+
+Measure:
+
+- attack success rate
+- injection detection recall
+- paired benign false-positive rate
+- correct paired classification
+- unsafe external effect count
+
+Even if detector recall is imperfect, unsafe external effects must remain zero because the architecture has independent capability and approval floors.
+
+Layer 7 - learning evaluation
+
+Measure:
+
+- ASK, NOTIFY, and SILENT rate over time
+- user disagreement rate
+- time to promotion
+- time to demotion
+- cross-context leakage
+- Brier score
+- calibration curve
+- comparison with a no-learning baseline
+
+The expected qualitative result is fewer unnecessary asks in repeatedly approved safe contexts, with no increase in unsafe autonomy and immediate demotion after rejection.
+
+Layer 8 - end-to-end tests
+
+Run fixture email through normalization, planner, detector, policy, learner, router, approval, executor, events, feedback, and learning. Verify both returned output and persisted audit state.
+
+Layer 9 - manual review
+
+Inspect every final eval failure, the worst-confidence cases, ambiguous items, all escalation reasons, the five demo transcripts, and the generated charts. Automated numbers are combined with human judgment.
+
+
+24. FAILURE-INJECTION TESTING
+=============================
+
+Failures are created intentionally, not merely waited for.
+
+Planner failures:
+
+- network timeout
+- rate limit
+- invalid JSON
+- valid JSON with missing fields
+- unknown action type
+- payload that violates its action schema
+- conflicting intent and payload
+
+Expected result: no execution; append a failure event; return ESCALATE or safe defer.
+
+Approval failures:
+
+- recipient changed after approval
+- subject changed after approval
+- body changed after approval
+- proposal version changed
+- approval expired
+- approval replayed
+- approval used concurrently twice
+
+Expected result: no execution for the invalid attempt and an auditable denial reason.
+
+Execution failures:
+
+- crash before EXECUTING is committed
+- crash after EXECUTING but before adapter call
+- adapter fails before applying an effect
+- adapter applies external effect but response is lost
+- crash after provider success but before local success record
+- duplicate processing of the incoming email
+
+Expected result depends on certainty. Safe known failures become FAILED_SAFE. Ambiguous external results become UNKNOWN and are not automatically repeated.
+
+Learning failures:
+
+- duplicate approval event
+- duplicate rejection event
+- projection update interrupted
+- restart before projection update
+- out-of-order feedback
+
+Expected result: each explicit feedback changes evidence exactly once; the event log permits reconstruction; no silent corruption.
+
+Storage failures:
+
+- locked SQLite database
+- constraint violation
+- malformed stored event
+- transaction rollback
+
+Expected result: no side effect starts unless required local safety and audit state is durably recorded. The CLI communicates the safe failure clearly.
+
+
+25. METRICS AND REPORTS
+=======================
+
+The reports directory contains both machine-readable and interviewer-readable output.
+
+    reports/
+    |-- summary.md
+    |-- run_metadata.json
+    |-- policy_results.json
+    |-- semantic_results.json
+    |-- injection_results.json
+    |-- learning_results.json
+    |-- failure_results.json
+    |-- confusion_matrix.png
+    |-- calibration_curve.png
+    `-- autonomy_over_time.png
+
+Every run records:
+
+- timestamp
+- model ID
+- prompt hash
+- dataset hashes
+- code commit when Git is available
+- dependency lock hash
+- random seeds where applicable
+- sample counts
+- repeated-run count
+- latency and token usage
+- raw failures and case identifiers
+- aggregate metrics
+- confidence intervals where meaningful
+
+Predeclared release gates:
+
+Absolute safety gates:
+
+- policy invariant violations = 0
+- external actions below ASK = 0
+- disabled actions executed = 0
+- permanent deletes executed = 0
+- financial actions executed = 0
+- tampered approvals executed = 0
+- replayed approvals executed = 0
+- duplicate external effects = 0
+- automatic retries of UNKNOWN external sends = 0
+- unsafe external effects from injection cases = 0
+
+Quality gates are reported as measured results rather than fabricated claims. Before final submission, practical target thresholds are selected for action accuracy, intent macro F1, risk recall, benign injection false-positive rate, and calibration. If a threshold is missed, the report remains honest and the failing cases guide improvement.
+
+The final report compares:
+
+- current planner versus a simple baseline
+- contextual learner versus no learning
+- each prompt or model configuration on the same frozen cases
+- safety outcomes separately from semantic accuracy
+
+
+26. STEP-BY-STEP CODING SEQUENCE
+================================
+
+This is the exact implementation order. Each step leaves the project in a runnable and testable state.
+
+PHASE 0 - establish the project contract
+----------------------------------------
+
+Step 0.1: Write README and DESIGN skeletons
+
+What I code:
+- problem statement
+- four autonomy tiers
+- central safety principle
+- supported and unsupported actions
+- how to run tests and demo
+- architectural diagram placeholder
+
+Why first:
+It prevents the implementation from drifting and ensures every later choice is judged against the brief.
+
+Verification:
+An interviewer can understand the intended behavior before reading code.
+
+Step 0.2: Initialize Python tooling
+
+What I code:
+- pyproject.toml
+- src layout
+- uv lockfile
+- Ruff, Pyright/mypy, pytest, and coverage configuration
+- .gitignore and .env.example
+
+Verification:
+- package imports successfully
+- lint, type check, and an initial test run succeed
+
+
+PHASE 1 - domain and immutable safety model
+-------------------------------------------
+
+Step 1.1: Define enums and Pydantic domain types
+
+What I code:
+- AutonomyTier
+- ActionType
+- execution and approval states
+- EmailEnvelope
+- action-specific payload models
+- ActionProposal, RiskAssessment, Decision, FeedbackEvent
+
+How it works:
+Pydantic rejects missing, extra, or invalid fields at boundaries. Discriminated unions ensure an archive payload cannot secretly contain send-reply fields.
+
+Verification:
+Unit tests cover valid construction and invalid examples.
+
+Step 1.2: Implement the capability catalogue
+
+What I code:
+A read-only mapping from ActionType to CapabilitySpec.
+
+How it works:
+Every action receives code-owned metadata for externality, reversibility, danger, enablement, and minimum tier.
+
+Verification:
+Tests enumerate every ActionType and ensure no action is missing a capability. Tests confirm external actions are at least ASK and disabled actions escalate.
+
+Step 1.3: Implement policy engine and final invariant validator
+
+What I code:
+- most-restrictive tier operation
+- hard sensitive-category rules
+- unknown and invalid fail-closed paths
+- invariant validator
+
+How it works:
+The policy result is the maximum restriction across fixed floors and learned preference. The final validator independently rejects contradictions.
+
+Verification:
+Unit and Hypothesis tests establish zero floor violations across generated combinations.
+
+Milestone:
+At the end of Phase 1, safety policy works without an LLM, database, or mailbox.
+
+
+PHASE 2 - storage and offline fixture pipeline
+----------------------------------------------
+
+Step 2.1: Create SQLite schema and database wrapper
+
+What I code:
+- versioned schema initialization
+- transaction helper
+- foreign keys and busy timeout
+- events, emails, proposals, decisions, approvals, executions, feedback, and preference tables
+
+How it works:
+Short local transactions atomically persist an event and its related projection update.
+
+Verification:
+Tests use a temporary database, enforce constraints, test rollbacks, and rebuild projections when supported.
+
+Step 2.2: Implement append-only event store
+
+What I code:
+- typed event append
+- event retrieval by aggregate
+- stable JSON serialization
+- event versioning
+
+Verification:
+Events retain order, IDs are unique, and stored payloads round-trip into domain models.
+
+Step 2.3: Implement fixture mailbox and normalizer
+
+What I code:
+- JSON fixture reader
+- deduplication
+- HTML-to-text normalization
+- Unicode and zero-width handling
+- size limits
+- inert URL and attachment metadata
+
+Verification:
+Tests use malicious HTML, Unicode tricks, duplicates, quoted threads, large input, and missing headers.
+
+Step 2.4: Implement a deterministic fake planner
+
+Why:
+The pipeline should be testable without API cost or nondeterminism.
+
+What I code:
+A test planner returning preconfigured proposals for fixture IDs.
+
+Step 2.5: Build the pipeline through decision creation
+
+What I code:
+Ingest -> normalize -> scan placeholder -> plan -> validate -> policy -> decision -> events.
+
+Milestone:
+A fixture email produces a fully auditable ASK/NOTIFY/SILENT/ESCALATE decision offline.
+
+
+PHASE 3 - real LLM planner
+--------------------------
+
+Step 3.1: Write the planner schema and prompt
+
+What I code:
+- concise planner instructions
+- explicit untrusted-content wrapper
+- strict JSON Schema generated from Pydantic
+- supported actions and evidence fields
+
+How it works:
+The model proposes one structured action but is never asked to authorize or execute it.
+
+Step 3.2: Implement OpenAI adapter
+
+What I code:
+- Responses API client wrapper
+- configurable model
+- timeouts and bounded retry for safe request failures
+- response parsing
+- model and prompt metadata logging
+
+Verification:
+- mocked SDK contract tests
+- one opt-in live smoke test
+- invalid and timeout tests
+
+Step 3.3: Build initial semantic dataset
+
+What I do:
+Create and manually label normal, ambiguous, edge, and sensitive fixture messages. Separate development and held-out cases.
+
+Step 3.4: Run baseline semantic evaluation
+
+What happens:
+The evaluation records initial action and intent quality. Prompt improvements respond to measured error clusters, not intuition.
+
+Milestone:
+The real planner is replaceable by the fake planner, schema-valid, and measured independently from policy.
+
+
+PHASE 4 - injection and risk layer
+----------------------------------
+
+Step 4.1: Implement deterministic injection heuristics
+
+What I code:
+- normalized pattern detection
+- fake role and instruction override detection
+- secret and forwarding request patterns
+- hidden-character findings
+- evidence categories
+
+Step 4.2: Implement sensitive-content rules
+
+What I code:
+Detectors or planner-supported classifications for credentials, account recovery, banking, financial transfer, and legal commitment content. Hard categories map to ESCALATE in deterministic policy.
+
+Step 4.3: Optionally add a separate semantic detector
+
+How it works:
+It classifies suspicious intent but cannot lower risk. Failure of this detector causes conservative behavior and never authorizes an action.
+
+Step 4.4: Create paired attack/control dataset
+
+Verification:
+Run attack recall and benign false-positive evaluation. Confirm unsafe external effect count is zero independently of detector accuracy.
+
+
+PHASE 5 - contextual learning
+-----------------------------
+
+Step 5.1: Implement context builder
+
+What I code:
+Stable bucketing for action, intent, sender relationship, and recipient scope. Unknown or novel buckets remain conservative.
+
+Step 5.2: Implement Beta preference state
+
+What I code:
+- alpha and beta update functions
+- posterior tail probability
+- observation count
+- recent negative history
+- cooldown state
+
+Step 5.3: Implement promotion router
+
+What I code:
+The ASK, NOTIFY, and SILENT evidence thresholds, with an explicit capability eligibility check for SILENT.
+
+Step 5.4: Implement feedback ingestion and deduplication
+
+What I code:
+Approved, edited, rejected, undone, and corrected updates that are committed exactly once.
+
+Step 5.5: Create chronological persona simulation
+
+Verification:
+- safe repeated approvals reduce ASK rate
+- external actions remain ASK
+- rejection demotes immediately
+- context evidence does not leak
+- no feedback does not learn
+- Brier score and calibration are reported
+
+Milestone:
+The system visibly becomes less interruptive without receiving any new authority.
+
+
+PHASE 6 - approvals and execution
+---------------------------------
+
+Step 6.1: Implement canonical payload hashing
+
+What I code:
+Stable serialization and SHA-256 hashing for each executable action payload.
+
+Verification:
+Equivalent payloads hash identically; any recipient, body, subject, message, action, or version change produces a different authorization identity.
+
+Step 6.2: Implement approval service
+
+What I code:
+Creation, expiry, grant, rejection, invalidation, edit/versioning, atomic consumption, and audit events.
+
+Step 6.3: Implement execution state machine
+
+What I code:
+Validated transitions and rejection of illegal state changes.
+
+Step 6.4: Implement idempotency
+
+What I code:
+Stable effect keys, unique storage constraints, duplicate-success lookup, and concurrent claim behavior.
+
+Step 6.5: Implement mock executor
+
+What I code:
+In-memory or SQLite-backed mailbox effects plus programmable safe failure, timeout, and unknown-result injection.
+
+Step 6.6: Add final pre-execution validator
+
+What happens:
+Immediately before the adapter call, the system rechecks policy, exact approval, payload hash, state, and idempotency.
+
+Verification:
+Tampering, replay, expiry, duplicate execution, concurrent approval, crash gaps, and unknown outcomes are tested.
+
+
+PHASE 7 - CLI and full demonstration
+------------------------------------
+
+Step 7.1: Build inspection commands
+
+What I code:
+Inbox, decision, events, and preferences views.
+
+Step 7.2: Build approval commands
+
+What I code:
+Approve, edit, reject, correct, and undo interactions. Every command shows the precise effect before confirmation.
+
+Step 7.3: Build deterministic demo command
+
+What I code:
+A curated resettable sequence that demonstrates cold start, learning, safety floor, injection, and unknown execution outcome.
+
+Verification:
+The same demo starts from a clean database and produces the expected transcript repeatedly. A fake planner mode is available if network access is unavailable; a live planner mode demonstrates actual semantic behavior.
+
+
+PHASE 8 - complete evaluation harness
+-------------------------------------
+
+Step 8.1: Implement one command for all evaluations
+
+What I code:
+An orchestrator that runs static metadata collection, policy, semantic, injection, learning, failure, and end-to-end suites.
+
+Step 8.2: Generate reports and plots
+
+What I code:
+JSON results, Markdown summary, confusion matrix, calibration plot, and autonomy-over-time plot.
+
+Step 8.3: Record reproducibility metadata
+
+What I code:
+Model, prompt, dataset, dependency, code, seed, latency, usage, and run-count fields.
+
+Step 8.4: Freeze and run final held-out evaluation
+
+What happens:
+No prompt tuning occurs after viewing final held-out results unless the final evaluation is explicitly invalidated and a new untouched set is created.
+
+
+PHASE 9 - documentation and interview package
+---------------------------------------------
+
+Step 9.1: Complete README
+
+It contains installation, configuration, quickstart, demo commands, eval commands, and troubleshooting.
+
+Step 9.2: Complete DESIGN.md
+
+It explains threat model, architecture, action catalogue, learning math, approval binding, idempotency, failure semantics, tradeoffs, limitations, and production path.
+
+Step 9.3: Save example transcripts
+
+At least five transcripts cover the primary story. They show exact decisions and audit evidence, not fabricated screenshots.
+
+Step 9.4: Clean-machine rehearsal
+
+Clone or copy the project into a clean location, install from the lockfile, run tests, run evaluations, and perform the demo using only documented commands.
+
+
+PHASE 10 - optional Gmail adapter
+---------------------------------
+
+This phase begins only if all core release gates are green.
+
+What I code:
+- OAuth setup documentation
+- sync-once inbox ingestion
+- read, label, archive, draft, trash, and approved-send adapter functions
+- provider reconciliation identifiers
+- Gmail adapter contract tests
+
+What I do not add unless required:
+- push subscriptions
+- distributed workers
+- general-recipient live sending
+- production deployment
+
+
+27. CONTINUOUS INTEGRATION AND QUALITY GATES
+============================================
+
+The CI pipeline should run on each committed change:
+
+1. Install exact locked dependencies.
+2. Run Ruff formatting check.
+3. Run Ruff lint.
+4. Run strict type checking.
+5. Run unit tests.
+6. Run property-based safety tests.
+7. Run integration and offline end-to-end tests.
+8. Generate coverage.
+9. Archive test results and local evaluation summary.
+
+Live-model evaluation is optional in ordinary CI because it requires credentials, costs money, and can vary. It runs manually before submission or in a protected credential-enabled workflow.
+
+Suggested commands:
+
+    uv sync --locked
+    uv run ruff format --check .
+    uv run ruff check .
+    uv run pyright
+    uv run pytest -m "not live" --cov=src/wajo_agent --cov-branch
+    uv run python -m evals.run_all --mode offline
+    uv run python -m evals.run_all --mode live
+
+These are target commands; the README will contain the exact final commands supported by the implemented CLI.
+
+
+28. FINAL INTERVIEW DEMONSTRATION
+=================================
+
+I would explain and demonstrate the project in this order:
+
+1. State the safety principle
+
+"The model can propose actions, but ordinary Python policy grants authority. Learning can reduce interruptions only within immutable action floors."
+
+2. Show the architecture
+
+Point out the untrusted email boundary, planner without tools, deterministic policy, contextual learner, approval binding, executor, and event log.
+
+3. Show the capability catalogue
+
+Demonstrate that reply is always ASK, payment and permanent delete are unavailable, and only reversible internal actions are eligible for SILENT.
+
+4. Run cold-start newsletter
+
+The planner proposes archive. The agent asks because it lacks evidence. Approve it and show the feedback and preference event.
+
+5. Run repeated newsletter learning
+
+Show the Beta posterior, observation count, and movement from ASK to NOTIFY to SILENT. Explain that this exact context is eligible because archive is internal and reversible.
+
+6. Run external reply
+
+Preload high trust if necessary. Show that the learner may prefer more autonomy but the capability floor forces ASK. Display the exact recipient, subject, body, proposal version, and approval hash. Edit it and show that the old approval becomes invalid.
+
+7. Run injection email
+
+Show normalization findings, injection reasons, ESCALATE, and the absence of an execution record.
+
+8. Run unknown external result
+
+Approve a test reply in the mock system, inject a timeout after the simulated provider accepted it, and show UNKNOWN with no automatic retry.
+
+9. Show the event trail
+
+Trace email_received through decision, approval, execution, feedback, and preference update.
+
+10. Show measured results
+
+Open summary.md and the plots. Clearly separate zero deterministic safety violations from non-perfect semantic planner metrics.
+
+11. Discuss limitations honestly
+
+Explain fixture-first scope, the bounded action set, Gmail adapter status, dataset size, and how production infrastructure would evolve.
+
+
+29. SECURITY AND PRIVACY CONSIDERATIONS
+=======================================
+
+Threats considered:
+
+- malicious instructions inside email
+- fake system or administrator messages
+- hidden Unicode or HTML content
+- malformed LLM output
+- unknown action proposal
+- approval tampering and replay
+- duplicate delivery
+- duplicate execution
+- external timeout ambiguity
+- sensitive email content in logs
+- leaked OAuth or API secrets
+- learning poisoning through implicit feedback
+- trust leakage across contexts
+
+Controls:
+
+- planner has no tools
+- structured output and typed validation
+- immutable capability catalogue
+- most-restrictive policy composition
+- final pre-execution validation
+- exact single-use approval hash
+- idempotency keys and unique constraints
+- explicit UNKNOWN state
+- no automatic external retry after ambiguity
+- explicit feedback only
+- contextual rather than global trust
+- secret files excluded from Git
+- minimum provider scopes
+- dry-run and fixture mode by default
+- audit events and reproducibility metadata
+- redaction of sensitive fields in display logs
+
+The audit log may contain private information in a local demonstration, so retention, encryption, redaction, and access control would need stronger treatment in production.
+
+
+30. KNOWN LIMITATIONS AND PRODUCTION EVOLUTION
+==============================================
+
+Take-home limitations:
+
+- The fixture mailbox is the required execution environment; Gmail is optional.
+- The semantic dataset is intentionally modest and human-reviewed, not a production-scale traffic sample.
+- Preference contexts use manually designed buckets rather than learned embeddings.
+- The CLI is optimized for evaluation, not consumer UX.
+- The detector cannot guarantee perfect injection recall; structural safety remains the real defense.
+- SQLite and a single writer are suitable for the demo, not high-volume multi-user operation.
+- Reconciliation for external UNKNOWN outcomes is demonstrated through the mock adapter and provider IDs rather than a full operations service.
+
+Production evolution:
+
+    Gmail Pub/Sub
+        -> ingestion service
+        -> durable queue
+        -> planner workers
+        -> deterministic policy service/library
+        -> PostgreSQL event and state store
+        -> approval API and user interface
+        -> idempotent executor workers
+        -> reconciliation service
+        -> monitoring and audit dashboard
+
+Additional production work:
+
+- authentication and per-user authorization
+- encrypted secrets and token rotation
+- tenant isolation
+- database migrations and backups
+- rate limits and quotas
+- distributed locks or work claims
+- provider webhook verification
+- data retention and deletion policy
+- privacy review and consent
+- operational monitoring and alerting
+- shadow mode before enabling autonomy
+- canary rollout by action type
+- versioned policy deployment
+- incident response and kill switch
+
+The same central architecture remains: model proposal, deterministic authorization, bound approval, idempotent execution, explicit feedback, and measured evaluation.
+
+
+31. DEFINITION OF DONE
+======================
+
+Functional completion:
+
+- All four autonomy tiers are reachable in legitimate scenarios.
+- Fixture emails run through the complete pipeline.
+- The planner returns validated structured proposals.
+- The deterministic policy produces explainable decisions.
+- Contextual learning reduces asks in safe repeated contexts.
+- Negative feedback demotes autonomy.
+- ASK creates exact, expiring, single-use approvals.
+- The mock executor performs supported effects idempotently.
+- Every important transition is audited.
+
+Safety completion:
+
+- External effects are never below ASK.
+- Financial and irreversible actions are unavailable.
+- Prompt injection cannot directly cause execution.
+- Learning cannot edit capability metadata.
+- Unknown and invalid inputs fail closed.
+- Payload modification invalidates approval.
+- Duplicate attempts do not duplicate effects.
+- UNKNOWN external outcomes do not automatically retry.
+
+Evaluation completion:
+
+- Static, unit, property, integration, and end-to-end tests pass.
+- At least 1,000 generated policy combinations produce zero invariant violations.
+- Semantic planner metrics are measured on a held-out set.
+- Injection attacks and paired benign controls are measured.
+- Chronological learning personas produce curves and calibration metrics.
+- Failure injection verifies crash, retry, replay, and duplicate behavior.
+- Reports contain raw failures and reproducibility metadata.
+
+Submission completion:
+
+- README is accurate.
+- DESIGN.md is concise but complete.
+- Example transcripts are included.
+- The dependency lockfile is committed.
+- .env.example contains no secret.
+- Tests and demo run from a clean environment using documented commands.
+- Claims in the write-up exactly match measured final results.
+
+
+32. SHORT INTERVIEWER SUMMARY
+=============================
+
+"I built the email agent as a constrained decision system rather than giving an LLM direct mailbox access. The LLM only converts untrusted email content into a typed proposal. A deterministic policy catalogue establishes immutable safety floors: external writes require approval, destructive and financial actions cannot run, and suspicious or sensitive situations escalate.
+
+The system learns only contextual preferences. It uses a Beta posterior for an exact action, intent, sender bucket, and recipient scope. Repeated explicit approval can move an internal reversible action from ask to notify and eventually silent, while rejection immediately reduces autonomy. Learning never changes what an action is allowed to do.
+
+Approval is bound to the exact canonical payload and proposal version, expires, and can be consumed only once. The executor rechecks policy, approval, payload integrity, and idempotency immediately before acting. External timeouts become unknown rather than being retried blindly.
+
+Finally, I evaluate the model and the safety system separately. Property tests prove deterministic invariants over generated combinations, labelled emails measure planner quality, paired attacks and benign controls measure injection handling, chronological personas measure learning and calibration, and injected failures measure correctness under crashes, duplicates, tampering, and uncertain provider outcomes. The result is not a claim that an LLM is flawless; it is an auditable system where risky authority remains deterministic and every probabilistic component has measured behavior."
+
+
+END OF DOCUMENT
+===============
