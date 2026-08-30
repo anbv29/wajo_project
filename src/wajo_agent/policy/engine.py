@@ -90,4 +90,3 @@ class PolicyEngine:
             raise PolicyViolation("disabled or financial action must escalate")
         if risk.injection_detected and decision.tier != AutonomyTier.ESCALATE:
             raise PolicyViolation("injection-affected decision must escalate")
-

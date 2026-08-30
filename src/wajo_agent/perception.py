@@ -7,7 +7,6 @@ from html.parser import HTMLParser
 
 from wajo_agent.domain import EmailEnvelope, RiskAssessment
 
-
 ZERO_WIDTH = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
 
 
@@ -42,18 +41,40 @@ def normalize_email(email: EmailEnvelope) -> tuple[EmailEnvelope, bool]:
 
 
 INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("instruction_override", re.compile(r"\b(ignore|disregard|override)\b.{0,40}\b(instruction|prompt|rule)s?\b", re.I)),
-    ("fake_system_role", re.compile(r"\b(system|developer|administrator)\s*(message|instruction|override)\b", re.I)),
-    ("secret_exfiltration", re.compile(r"\b(reveal|print|send|forward)\b.{0,50}\b(secret|api key|password|token|system prompt)\b", re.I)),
+    (
+        "instruction_override",
+        re.compile(r"\b(ignore|disregard|override)\b.{0,40}\b(instruction|prompt|rule)s?\b", re.I),
+    ),
+    (
+        "fake_system_role",
+        re.compile(r"\b(system|developer|administrator)\s*(message|instruction|override)\b", re.I),
+    ),
+    (
+        "secret_exfiltration",
+        re.compile(
+            r"\b(reveal|print|send|forward)\b.{0,50}\b"
+            r"(secret|api key|password|token|system prompt)\b",
+            re.I,
+        ),
+    ),
     ("fake_approval", re.compile(r"\b(approved by user|approval token|already approved)\b", re.I)),
 )
 
 SENSITIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("credentials", re.compile(r"\b(password|passcode|one[- ]time code|otp|api key|secret token)\b", re.I)),
-    ("account_recovery", re.compile(r"\b(reset your password|account recovery|recover your account)\b", re.I)),
+    (
+        "credentials",
+        re.compile(r"\b(password|passcode|one[- ]time code|otp|api key|secret token)\b", re.I),
+    ),
+    (
+        "account_recovery",
+        re.compile(r"\b(reset your password|account recovery|recover your account)\b", re.I),
+    ),
     ("banking", re.compile(r"\b(bank account|routing number|wire transfer|credit card)\b", re.I)),
     ("payment", re.compile(r"\b(pay|payment|purchase|invoice transfer)\b", re.I)),
-    ("legal_commitment", re.compile(r"\b(sign|accept)\b.{0,30}\b(contract|agreement|terms)\b", re.I)),
+    (
+        "legal_commitment",
+        re.compile(r"\b(sign|accept)\b.{0,30}\b(contract|agreement|terms)\b", re.I),
+    ),
 )
 
 
@@ -70,4 +91,3 @@ class RiskScanner:
             suspicious_patterns=suspicious,
             normalized_changed=normalized_changed,
         )
-

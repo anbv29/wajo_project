@@ -99,4 +99,3 @@ CAPABILITIES: dict[ActionType, CapabilitySpec] = {
 
 if set(CAPABILITIES) != set(ActionType):
     raise RuntimeError("every action type must have exactly one capability specification")
-

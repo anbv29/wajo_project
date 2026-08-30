@@ -18,4 +18,3 @@ class Settings:
             user_id=os.getenv("WAJO_USER_ID", "local-demo-user"),
             planner_model=os.getenv("WAJO_PLANNER_MODEL", "gpt-5.6-terra"),
         )
-

@@ -25,10 +25,7 @@ def beta_tail_probability(alpha: int, beta: int, threshold: float) -> float:
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("threshold must be between zero and one")
     n = alpha + beta - 1
-    return sum(
-        comb(n, j) * threshold**j * (1.0 - threshold) ** (n - j)
-        for j in range(alpha)
-    )
+    return sum(comb(n, j) * threshold**j * (1.0 - threshold) ** (n - j) for j in range(alpha))
 
 
 class ContextualPreferenceLearner:
@@ -99,4 +96,3 @@ class ContextualPreferenceLearner:
         )
         self.repository.save_preference(updated)
         return updated
-

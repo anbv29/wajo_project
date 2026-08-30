@@ -206,9 +206,7 @@ class PreferenceContext(StrictModel):
 
     @property
     def key(self) -> str:
-        return "|".join(
-            (self.action_type, self.intent, self.sender_bucket, self.recipient_scope)
-        )
+        return "|".join((self.action_type, self.intent, self.sender_bucket, self.recipient_scope))
 
 
 class PreferenceState(StrictModel):
@@ -261,4 +259,3 @@ class AgentOutcome(StrictModel):
     decision: Decision
     approval: ApprovalRecord | None = None
     execution: ExecutionResult | None = None
-
