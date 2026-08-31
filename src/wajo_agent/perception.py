@@ -1,44 +1,8 @@
 from __future__ import annotations
 
-import html
 import re
-import unicodedata
-from html.parser import HTMLParser
 
 from wajo_agent.domain import EmailEnvelope, RiskAssessment
-
-ZERO_WIDTH = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
-
-
-class _TextExtractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-
-    def handle_data(self, data: str) -> None:
-        self.parts.append(data)
-
-
-def normalize_text(value: str, *, max_chars: int = 50_000) -> tuple[str, bool]:
-    original = value
-    parser = _TextExtractor()
-    parser.feed(value)
-    visible = " ".join(parser.parts) if "<" in value and ">" in value else value
-    visible = html.unescape(visible)
-    visible = unicodedata.normalize("NFKC", visible)
-    visible = ZERO_WIDTH.sub("", visible)
-    visible = re.sub(r"[ \t]+", " ", visible)
-    visible = re.sub(r"\n{3,}", "\n\n", visible).strip()
-    visible = visible[:max_chars]
-    return visible, visible != original
-
-
-def normalize_email(email: EmailEnvelope) -> tuple[EmailEnvelope, bool]:
-    subject, subject_changed = normalize_text(email.subject, max_chars=500)
-    body, body_changed = normalize_text(email.body_text)
-    normalized = email.model_copy(update={"subject": subject, "body_text": body})
-    return normalized, subject_changed or body_changed
-
 
 INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
