@@ -1,3 +1,12 @@
+from wajo_agent.domain.autonomy import (
+    AUTONOMY_BEHAVIORS,
+    TIER_RANK,
+    AutonomyBehavior,
+    AutonomyTier,
+    behavior_for,
+    is_at_least,
+    most_restrictive,
+)
 from wajo_agent.domain.models import (
     ActionPayload,
     ActionProposal,
@@ -6,7 +15,6 @@ from wajo_agent.domain.models import (
     ApprovalRecord,
     ApprovalStatus,
     AttachmentMetadata,
-    AutonomyTier,
     Decision,
     DraftPayload,
     EmailEnvelope,
@@ -27,6 +35,8 @@ from wajo_agent.domain.models import (
 )
 
 __all__ = [
+    "AUTONOMY_BEHAVIORS",
+    "TIER_RANK",
     "ActionPayload",
     "ActionProposal",
     "ActionType",
@@ -34,6 +44,7 @@ __all__ = [
     "ApprovalRecord",
     "ApprovalStatus",
     "AttachmentMetadata",
+    "AutonomyBehavior",
     "AutonomyTier",
     "Decision",
     "DraftPayload",
@@ -52,4 +63,7 @@ __all__ = [
     "ReplyPayload",
     "RiskAssessment",
     "SenderBucket",
+    "behavior_for",
+    "is_at_least",
+    "most_restrictive",
 ]

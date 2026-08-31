@@ -7,7 +7,7 @@ from wajo_agent.domain import (
     PreferenceState,
     RiskAssessment,
 )
-from wajo_agent.domain.models import TIER_RANK, most_restrictive
+from wajo_agent.domain.autonomy import TIER_RANK, most_restrictive
 from wajo_agent.policy.capabilities import CAPABILITIES, CapabilitySpec
 
 

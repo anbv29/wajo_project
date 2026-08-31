@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from wajo_agent.domain.autonomy import AutonomyTier
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
@@ -18,25 +20,6 @@ def utc_now() -> datetime:
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class AutonomyTier(StrEnum):
-    SILENT = "silent"
-    NOTIFY = "notify"
-    ASK = "ask"
-    ESCALATE = "escalate"
-
-
-TIER_RANK: dict[AutonomyTier, int] = {
-    AutonomyTier.SILENT: 0,
-    AutonomyTier.NOTIFY: 1,
-    AutonomyTier.ASK: 2,
-    AutonomyTier.ESCALATE: 3,
-}
-
-
-def most_restrictive(*tiers: AutonomyTier) -> AutonomyTier:
-    return max(tiers, key=TIER_RANK.__getitem__)
 
 
 class ActionType(StrEnum):
