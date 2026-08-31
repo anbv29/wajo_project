@@ -186,20 +186,48 @@ class MessagePayload(StrictModel):
         ActionType.TRASH,
         ActionType.PERMANENT_DELETE,
     ]
-    message_id: str
+    message_id: str = Field(min_length=1, max_length=512)
+
+    @field_validator("message_id")
+    @classmethod
+    def clean_message_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("message_id cannot be blank")
+        return cleaned
 
 
 class LabelPayload(StrictModel):
     kind: Literal[ActionType.ADD_LABEL] = ActionType.ADD_LABEL
-    message_id: str
+    message_id: str = Field(min_length=1, max_length=512)
     label: str = Field(min_length=1, max_length=100)
+
+    @field_validator("message_id", "label")
+    @classmethod
+    def clean_required_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("value cannot be blank")
+        return cleaned
 
 
 class DraftPayload(StrictModel):
     kind: Literal[ActionType.CREATE_DRAFT] = ActionType.CREATE_DRAFT
-    recipients: tuple[str, ...]
-    subject: str
-    body: str
+    recipients: tuple[str, ...] = Field(default=(), max_length=100)
+    subject: str = Field(default="", max_length=1_000)
+    body: str = Field(default="", max_length=50_000)
+
+    @field_validator("recipients")
+    @classmethod
+    def clean_recipients(cls, recipients: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(address.strip() for address in recipients if address.strip())
+        return tuple(dict.fromkeys(cleaned))
+
+    @model_validator(mode="after")
+    def contains_draft_content(self) -> DraftPayload:
+        if not self.subject.strip() and not self.body.strip():
+            raise ValueError("draft must contain a subject or body")
+        return self
 
 
 class ReplyPayload(StrictModel):
@@ -210,9 +238,23 @@ class ReplyPayload(StrictModel):
         ActionType.PAYMENT,
         ActionType.ACCOUNT_CHANGE,
     ]
-    recipients: tuple[str, ...] = ()
-    subject: str = ""
-    body: str = ""
+    recipients: tuple[str, ...] = Field(default=(), max_length=100)
+    subject: str = Field(default="", max_length=1_000)
+    body: str = Field(default="", max_length=50_000)
+
+    @field_validator("recipients")
+    @classmethod
+    def clean_recipients(cls, recipients: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(address.strip() for address in recipients if address.strip())
+        return tuple(dict.fromkeys(cleaned))
+
+    @model_validator(mode="after")
+    def validate_action_requirements(self) -> ReplyPayload:
+        if self.kind in {ActionType.SEND_REPLY, ActionType.FORWARD} and not self.recipients:
+            raise ValueError(f"{self.kind} requires at least one recipient")
+        if self.kind == ActionType.SEND_REPLY and not self.body.strip():
+            raise ValueError("send_reply requires a non-empty body")
+        return self
 
 
 ActionPayload = Annotated[
@@ -221,23 +263,68 @@ ActionPayload = Annotated[
 ]
 
 
-class ActionProposal(StrictModel):
-    proposal_id: str = Field(default_factory=lambda: new_id("proposal"))
-    version: int = 1
-    email_id: str
+class PlannerOutput(StrictModel):
+    """The only action-shaped data the AI planner is allowed to return."""
+
     action_type: ActionType
     intent: Intent
-    summary: str
+    summary: str = Field(min_length=1, max_length=500)
     payload: ActionPayload
-    evidence: tuple[str, ...] = ()
-    uncertainty_reasons: tuple[str, ...] = ()
-    created_at: datetime = Field(default_factory=utc_now)
+    evidence: tuple[str, ...] = Field(default=(), max_length=10)
+    uncertainty_reasons: tuple[str, ...] = Field(default=(), max_length=10)
 
     @model_validator(mode="after")
-    def payload_matches_action(self) -> ActionProposal:
+    def payload_matches_action(self) -> PlannerOutput:
         if self.payload.kind != self.action_type:
             raise ValueError("payload kind must match action_type")
         return self
+
+    @field_validator("summary")
+    @classmethod
+    def clean_summary(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("summary cannot be blank")
+        return cleaned
+
+    @field_validator("evidence", "uncertainty_reasons")
+    @classmethod
+    def clean_explanations(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(value.strip() for value in values)
+        if any(not value for value in cleaned):
+            raise ValueError("explanation entries cannot be blank")
+        if any(len(value) > 500 for value in cleaned):
+            raise ValueError("explanation entries cannot exceed 500 characters")
+        return cleaned
+
+    def bind_to_email(self, email_id: str) -> ActionProposal:
+        """Add application-owned identity after the model output has been validated."""
+        return ActionProposal(
+            email_id=email_id,
+            action_type=self.action_type,
+            intent=self.intent,
+            summary=self.summary,
+            payload=self.payload,
+            evidence=self.evidence,
+            uncertainty_reasons=self.uncertainty_reasons,
+        )
+
+
+class ActionProposal(PlannerOutput):
+    """A validated planner suggestion bound to one observed email."""
+
+    proposal_id: str = Field(default_factory=lambda: new_id("proposal"), max_length=512)
+    version: int = Field(default=1, ge=1)
+    email_id: str = Field(min_length=1, max_length=512)
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("proposal_id", "email_id")
+    @classmethod
+    def clean_identity(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("proposal identity cannot be blank")
+        return cleaned
 
 
 class RiskAssessment(StrictModel):
