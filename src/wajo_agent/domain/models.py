@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from wajo_agent.domain.autonomy import AutonomyTier
 
@@ -91,6 +91,44 @@ class ExecutionState(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED_SAFE = "failed_safe"
     UNKNOWN = "unknown"
+
+
+class InjectionSignal(StrEnum):
+    """Prompt-injection techniques observed in untrusted email text."""
+
+    INSTRUCTION_OVERRIDE = "instruction_override"
+    FAKE_PRIVILEGED_ROLE = "fake_privileged_role"
+    SECRET_EXFILTRATION = "secret_exfiltration"
+    FAKE_APPROVAL = "fake_approval"
+    ENCODED_INSTRUCTIONS = "encoded_instructions"
+    OBFUSCATED_INSTRUCTIONS = "obfuscated_instructions"
+    HIDDEN_ONLY_CONTENT = "hidden_only_content"
+
+
+class SensitiveCategory(StrEnum):
+    """Content categories that later policy code must treat cautiously."""
+
+    CREDENTIALS = "credentials"
+    ACCOUNT_RECOVERY = "account_recovery"
+    BANKING = "banking"
+    PAYMENT = "payment"
+    LEGAL_COMMITMENT = "legal_commitment"
+    PERSONAL_DATA = "personal_data"
+
+
+class NormalizationFlag(StrEnum):
+    """Lossy or suspicious transformations reported by email normalization."""
+
+    TRUNCATED_CONTENT = "truncated_content"
+    INVISIBLE_CHARACTERS = "invisible_characters"
+    CONTROL_CHARACTERS = "control_characters"
+    NO_VISIBLE_CONTENT = "no_visible_content"
+
+
+class RiskEvidenceSource(StrEnum):
+    SUBJECT = "subject"
+    BODY = "body"
+    NORMALIZATION = "normalization"
 
 
 class AttachmentMetadata(StrictModel):
@@ -310,12 +348,29 @@ class ActionProposal(PlannerOutput):
         return cleaned
 
 
+class RiskEvidence(StrictModel):
+    """A small, auditable reason why the scanner emitted a signal."""
+
+    signal: str = Field(min_length=1, max_length=100)
+    source: RiskEvidenceSource
+    matched_text: str = Field(min_length=1, max_length=160)
+
+
 class RiskAssessment(StrictModel):
-    injection_detected: bool = False
-    sensitive_categories: frozenset[str] = frozenset()
-    suspicious_patterns: tuple[str, ...] = ()
+    """Evidence from perception only; this model does not choose autonomy."""
+
+    injection_signals: frozenset[InjectionSignal] = frozenset()
+    sensitive_categories: frozenset[SensitiveCategory] = frozenset()
+    normalization_flags: frozenset[NormalizationFlag] = frozenset()
+    evidence: tuple[RiskEvidence, ...] = Field(default=(), max_length=50)
     missing_information: tuple[str, ...] = ()
-    normalized_changed: bool = False
+    normalization_changed: bool = False
+
+    @computed_field
+    @property
+    def injection_detected(self) -> bool:
+        """Derived from evidence so the boolean cannot contradict the signals."""
+        return bool(self.injection_signals)
 
 
 class PreferenceContext(StrictModel):

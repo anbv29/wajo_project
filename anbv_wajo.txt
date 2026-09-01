@@ -386,12 +386,18 @@ CapabilitySpec contains static code-owned metadata:
 
 RiskAssessment contains:
 
-- injection detected
-- suspicious patterns
-- sensitive categories
-- novelty indicators
+- typed injection signals, such as instruction override, fake role, secret exfiltration, fake approval, encoded instructions, and obfuscation
+- typed sensitive categories, such as credentials, account recovery, banking, payment, legal commitment, and personal data
+- normalization flags for truncated content, invisible characters, control characters, and content with no visible text
+- compact evidence records containing the signal, its source field, and only the matched excerpt
 - missing required information
-- policy reasons
+- a derived injection_detected value, so the summary boolean cannot disagree with the underlying signals
+
+The RiskScanner examines the normalized subject and body independently. It also consumes the
+EmailNormalizationReport, allowing preprocessing discoveries such as repeated zero-width
+characters or hidden-only HTML to become auditable risk evidence. The scanner deliberately does
+not choose SILENT, NOTIFY, ASK, or ESCALATE. It is a perception component; the deterministic
+policy engine remains the authority component.
 
 Decision contains:
 
