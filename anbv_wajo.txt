@@ -660,6 +660,27 @@ The invariant validator runs after policy calculation and again before execution
 
 The production path does not rely on Python assert statements because assertions can be disabled. It raises explicit domain errors, records the event, and fails closed.
 
+Implemented Step 9 behavior:
+
+1. The engine obtains the action's immutable capability floor from the catalogue.
+2. It independently calculates a content floor. Prompt injection and hard-sensitive categories
+   produce ESCALATE. Missing information, truncated content, or suspicious normalization produce
+   at least ASK.
+3. It combines capability_floor, content_floor, and preference_tier with most_restrictive(). A
+   less restrictive preference can therefore never cancel a stronger safety requirement.
+4. It creates an immutable Decision containing the proposal identity, all three component tiers,
+   the final tier, and human-readable audit reasons.
+5. A second validation pass recomputes the expected floors and final tier. It also checks proposal
+   ID and version binding, the original preference recommendation, external and destructive action
+   floors, disabled and financial actions, injection, sensitive content, missing information, and
+   normalization warnings. Any mismatch raises PolicyViolation.
+
+The scripts/check_policy.py smoke checker currently exercises all 13 action capabilities against
+all four preference recommendations, five explicit content-risk cases, a downgraded-decision
+tampering attempt, and a forged-preference tampering attempt. These 59 deterministic checks are a
+fast development gate. The larger property-based and end-to-end test suite is intentionally added
+later in the testing steps.
+
 
 13. CONTEXTUAL PREFERENCE LEARNING
 ==================================

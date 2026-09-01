@@ -401,8 +401,18 @@ class Decision(StrictModel):
     capability_floor: AutonomyTier
     preference_tier: AutonomyTier
     content_floor: AutonomyTier
-    reasons: tuple[str, ...]
+    reasons: tuple[str, ...] = Field(min_length=1, max_length=20)
     created_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def validate_audit_identity(self) -> Decision:
+        if (self.proposal_id is None) != (self.proposal_version is None):
+            raise ValueError("proposal_id and proposal_version must be present together")
+        if any(not reason.strip() for reason in self.reasons):
+            raise ValueError("decision reasons cannot be blank")
+        if any(len(reason) > 500 for reason in self.reasons):
+            raise ValueError("decision reasons cannot exceed 500 characters")
+        return self
 
 
 class ApprovalRecord(StrictModel):
