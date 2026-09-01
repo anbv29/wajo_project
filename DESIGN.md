@@ -51,6 +51,21 @@ Only capabilities marked internal, reversible, enabled, non-destructive, and non
 receive a learned `SILENT` recommendation. The learner returns its evidence and reasons; policy
 retains final authority.
 
+## Durable state and audit
+
+`SQLiteStore` is the durable implementation of the learner's preference repository and the local
+append-only audit store. Schema version 1 is installed through `PRAGMA user_version`; a database
+created by a newer application is rejected instead of guessed at. Connections enable foreign keys,
+WAL journal mode, a five-second busy timeout, and short explicit write transactions.
+
+The `audit_events` table assigns an independent monotonically increasing sequence within each
+stream. Database triggers reject updates and deletes, so append-only behavior still holds if code
+bypasses the repository. Payloads use deterministic, standards-compliant JSON and typed
+`AuditEvent` validation when read. `preference_states` is deliberately mutable because it is a
+current-state projection. A combined operation updates that projection and appends its explaining
+event in one transaction; either both commit or both roll back. Approval and execution projections
+are added with their workflows rather than being prematurely represented by unused tables.
+
 ## Scope
 
 The required path uses fixtures, SQLite, a mock mailbox executor, and a CLI. An OpenAI Responses

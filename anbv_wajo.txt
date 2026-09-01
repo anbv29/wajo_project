@@ -885,9 +885,9 @@ auditable in the demo and measurable in the evaluation harness.
 
 LearningThresholds is frozen code-owned configuration. The model cannot edit evidence minimums,
 probability thresholds, feedback weights, or cooldown lengths. InMemoryPreferenceRepository makes
-the behavior executable before the SQLite repository arrives in Step 15. Duplicate feedback is not
-yet accepted by an application workflow; durable feedback identity and deduplication are added when
-feedback is wired end to end in Step 20.
+fast unit tests possible without disk access. Step 15 adds SQLiteStore as the durable implementation
+of the same repository contract. Duplicate feedback is not yet accepted by an application workflow;
+durable feedback identity and deduplication are added when feedback is wired end to end in Step 20.
 
 
 14. FOUR-WAY AUTONOMY ROUTER
@@ -1020,6 +1020,29 @@ Retry rules:
 
 The system uses append-only events as the audit source and projection tables for efficient current state.
 
+What is implemented in coding Step 15:
+
+- AuditEvent is a strict immutable domain model with event ID, stream ID, per-stream sequence,
+  event type and version, JSON payload, and timezone-aware UTC occurrence time. The event version
+  lets a future reader deliberately upcast an older payload instead of silently guessing its shape.
+- SQLiteStore opens or creates a schema-version-1 database. PRAGMA user_version is the migration
+  marker. A database from a newer application version is rejected so older code cannot corrupt it.
+- audit_events is the append-only source of truth. Its primary key prevents duplicate event IDs,
+  its stream-and-sequence uniqueness preserves ordering, and database triggers reject UPDATE and
+  DELETE even when a caller bypasses Python and sends SQL directly.
+- preference_states stores the latest Beta evidence for each exact context key. This table is a
+  replaceable projection, not an immutable history; the explaining history belongs in events.
+- save_preference_and_append_event performs the projection update and audit append inside one
+  BEGIN IMMEDIATE transaction. If either write fails, both are rolled back.
+- JSON uses sorted keys, compact separators, Unicode preservation, and rejection of NaN or infinity.
+  Reads rebuild typed Pydantic models and fail visibly if stored data is malformed.
+- Connections enable foreign keys, a 5,000 millisecond busy timeout, WAL journal mode, and NORMAL
+  synchronous mode. No LLM or mailbox call occurs inside a database transaction.
+
+The Step 15 schema intentionally contains only audit_events and preference_states. Approval,
+execution, email, decision, and feedback-deduplication projections are added with the workflows
+that own their invariants in later coding steps. This keeps the current schema honest and tested.
+
 Core event types:
 
 - email_received
@@ -1039,7 +1062,7 @@ Core event types:
 - feedback_recorded
 - preference_updated
 
-Suggested tables:
+Planned full-system projection tables after the later workflow steps:
 
 events:
     event_id primary key

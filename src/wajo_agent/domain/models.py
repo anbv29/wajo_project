@@ -6,7 +6,15 @@ from hashlib import sha256
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from wajo_agent.domain.autonomy import AutonomyTier
 
@@ -480,6 +488,33 @@ class PreferenceRecommendation(StrictModel):
         if any(not value for value in cleaned):
             raise ValueError("recommendation reasons cannot be blank")
         return cleaned
+
+
+class AuditEvent(StrictModel):
+    """One immutable event loaded from the append-only audit stream."""
+
+    event_id: str = Field(min_length=1, max_length=512)
+    stream_id: str = Field(min_length=1, max_length=512)
+    sequence: int = Field(ge=1)
+    event_type: str = Field(min_length=1, max_length=100)
+    event_version: int = Field(default=1, ge=1)
+    payload: dict[str, JsonValue]
+    occurred_at: datetime
+
+    @field_validator("event_id", "stream_id", "event_type")
+    @classmethod
+    def clean_event_identity(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("event identity cannot be blank")
+        return cleaned
+
+    @field_validator("occurred_at")
+    @classmethod
+    def require_aware_event_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("occurred_at must include a timezone")
+        return value.astimezone(UTC)
 
 
 class Decision(StrictModel):
