@@ -27,14 +27,14 @@ reachable only through final policy, approval, payload-integrity, and idempotenc
 
 ## Learning
 
-Preferences use an exact context key: action, intent, sender bucket, and recipient scope. Each
-context has a Beta posterior. Explicit approval increases alpha; rejection or undo increases beta
-and triggers cooldown. Silence is not feedback. Only internal reversible actions can reach
-`SILENT`.
+Preferences use a versioned exact-context key: action, intent, sender bucket, hashed normalized
+sender identity, recipient scope, and action variant. This prevents trust from leaking between
+senders or materially different forms of an action. Each context has a Beta posterior. Explicit
+approval increases alpha; rejection or undo increases beta and triggers cooldown. Silence is not
+feedback. Only internal reversible actions can reach `SILENT`.
 
 ## Scope
 
 The required path uses fixtures, SQLite, a mock mailbox executor, and a CLI. An OpenAI Responses
 API planner is included behind configuration. Gmail remains an optional adapter after the offline
 safety and evaluation gates pass.
-

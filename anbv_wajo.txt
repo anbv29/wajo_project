@@ -689,20 +689,59 @@ The learning goal is not to predict a universal user personality. It is to learn
 
 Context key:
 
+    schema_version
+    + action_type
+    + intent
+    + sender_bucket
+    + normalized sender identity hash
+    + recipient_scope
+    + action_variant
+
+The concrete storage key is:
+
+    ctx_v1_<sha256 of canonical dimensions>
+
+The full normalized sender address and a label name are not written into the key. They are hashed
+before the final context key is generated. This preserves stable equality while avoiding obvious
+personal information in database primary keys and logs.
+
+Plain SHA-256 is pseudonymization, not full anonymization; a determined attacker could guess common
+addresses. A production multi-user system should use a tenant-specific keyed HMAC and protect the
+key in a secrets manager. SHA-256 is sufficient for deterministic local identity in this take-home,
+but the limitation is stated explicitly.
+
+An action variant separates materially different forms of the same action. For example, adding a
+Newsletter label does not earn trust for adding a Finance label. Recipient scope distinguishes:
+
+- an operation that affects only the mailbox
+- internal recipients
+- one external recipient
+- multiple external recipients
+- mixed internal and external recipients
+- no recipient
+
+The previous, overly broad four-field design was:
+
     action_type
     + intent
     + sender_bucket
     + recipient_scope
 
+It was rejected during implementation because all senders in one bucket could share preference
+history. The implemented identity includes a stable hash of the exact normalized sender, so trust
+for one known bulk sender cannot transfer to a different known bulk sender.
+
 Example:
 
-    archive | newsletter | known_bulk_sender | internal_mailbox
+    archive | newsletter | known_bulk | sender_hash_A | internal_mailbox | default
 
 This is different from:
 
-    archive | personal_message | known_person | internal_mailbox
+    archive | personal | known_person | sender_hash_B | internal_mailbox | default
 
-Trust earned for archiving newsletters cannot authorize handling personal messages. Broad statistics may be displayed as priors or analytics, but only exact-context evidence can produce SILENT.
+Trust earned for one sender, intent, action, recipient scope, or action variant cannot authorize a
+different context. Broad statistics may be displayed as priors or analytics, but only exact-context
+evidence can produce SILENT.
 
 Each context starts with a Beta distribution:
 

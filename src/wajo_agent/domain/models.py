@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from hashlib import sha256
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -61,8 +62,10 @@ class SenderBucket(StrEnum):
 
 class RecipientScope(StrEnum):
     INTERNAL_MAILBOX = "internal_mailbox"
+    INTERNAL_RECIPIENTS = "internal_recipients"
     EXTERNAL_SINGLE = "external_single"
     EXTERNAL_MULTIPLE = "external_multiple"
+    MIXED_RECIPIENTS = "mixed_recipients"
     NONE = "none"
 
 
@@ -374,14 +377,43 @@ class RiskAssessment(StrictModel):
 
 
 class PreferenceContext(StrictModel):
+    """Exact, versioned identity of one narrow preference-learning situation."""
+
+    schema_version: Literal[1] = 1
     action_type: ActionType
     intent: Intent
     sender_bucket: SenderBucket
+    sender_identity_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     recipient_scope: RecipientScope
+    action_variant: str = Field(default="default", min_length=1, max_length=100)
+
+    @field_validator("action_variant")
+    @classmethod
+    def normalize_action_variant(cls, value: str) -> str:
+        cleaned = value.strip().casefold()
+        if not cleaned:
+            raise ValueError("action_variant cannot be blank")
+        return cleaned
+
+    @property
+    def canonical_dimensions(self) -> str:
+        """Unambiguous input used to generate the stable storage key."""
+        return "\x1f".join(
+            (
+                str(self.schema_version),
+                self.action_type.value,
+                self.intent.value,
+                self.sender_bucket.value,
+                self.sender_identity_hash,
+                self.recipient_scope.value,
+                self.action_variant,
+            )
+        )
 
     @property
     def key(self) -> str:
-        return "|".join((self.action_type, self.intent, self.sender_bucket, self.recipient_scope))
+        digest = sha256(self.canonical_dimensions.encode("utf-8")).hexdigest()
+        return f"ctx_v{self.schema_version}_{digest}"
 
 
 class PreferenceState(StrictModel):
