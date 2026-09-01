@@ -24,6 +24,12 @@ classify a bounded set of intents and produce conservative typed proposals. Sens
 produce `NO_ACTION`, meetings and requests create drafts rather than sending, and unavailable
 actions fall back to `NO_ACTION` or a contract error. It has no network or side-effect access.
 
+`OpenAIPlanner` is the semantic implementation. It uses the Responses API with
+`text_format=PlannerOutput`, stable developer instructions, normalized email serialized as an
+untrusted JSON data object, no tools, and `store=False`. Only completed, parsed, allowlisted output
+is accepted. SDK failures, incomplete responses, missing parsed output, and schema violations are
+translated into safe planner errors.
+
 ## Safety floors
 
 - External writes are never below `ASK`.

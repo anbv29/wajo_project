@@ -542,16 +542,22 @@ The planner does not receive Gmail tools or execution functions. It cannot send,
 
 The planner returns a PlannerOutput with strict schema validation. Application code validates the
 request allowlist and then binds that output to an email to create an ActionProposal. A conceptual
-request looks like:
+request is:
 
-    response = client.responses.create(
+    response = client.responses.parse(
         model=config.planner_model,
         instructions=PLANNER_INSTRUCTIONS,
-        input=build_untrusted_email_input(email),
-        text={"format": proposal_json_schema},
+        input=build_openai_input(request),
+        text_format=PlannerOutput,
+        tools=[],
+        tool_choice="none",
+        parallel_tool_calls=False,
+        store=False,
     )
 
-The exact SDK syntax will be implemented against the installed SDK version and covered by a contract test.
+This exact call targets the installed OpenAI Python SDK 3.6.0. The SDK converts PlannerOutput into a
+strict JSON schema and returns response.output_parsed as a validated Pydantic object. The configured
+default model is gpt-5.6-terra, which supports both the Responses endpoint and Structured Outputs.
 
 The implemented Step 12 boundary is:
 
@@ -610,6 +616,29 @@ with an uncertainty reason. If even NO_ACTION is unavailable, it raises PlannerC
 than inventing another operation. The same input always yields the same PlannerOutput, which makes
 offline demos and evaluation fixtures reproducible. This planner is intentionally a limited
 baseline; the OpenAI semantic planner is a separate implementation of the same contract.
+
+OpenAI structured-output planner (Step 14):
+
+OpenAIPlanner implements the same Planner protocol. Stable developer instructions explain the
+planner's limited semantic role and explicitly state that email is untrusted data. Dynamic email
+content is serialized separately as compact JSON containing only normalized subject/body text,
+mail metadata, attachment metadata, the content-trust marker, and the exact enabled-action list.
+Email text is never concatenated into developer instructions.
+
+OpenAIResponsesTransport is the only class that imports and calls the OpenAI client. It provides no
+web, file, Gmail, function, MCP, shell, or other tools. Response storage is disabled. It translates
+SDK/API failures into PlannerUnavailableError and schema failures into PlannerContractError without
+turning either failure into an action proposal.
+
+The OpenAIPlanner accepts only a completed response with a non-null parsed PlannerOutput, then
+rechecks the request allowlist. Incomplete responses, refusals or empty parsed results, invalid
+payload/action combinations, and disallowed actions all fail closed. The planner still cannot bind
+the application email ID, choose autonomy, approve, execute, or learn.
+
+The development checker uses injected fake transports and fake SDK resources, so it validates the
+request shape, strict schema selection, empty tool list, disabled storage, status handling, error
+translation, and allowlist enforcement without an API key, network request, or billable call. A
+small opt-in live contract check may be added to the later test suite when credentials are present.
 
 If the API fails, times out, returns invalid JSON, returns an unknown action, or violates the schema, the pipeline records the failure and returns ESCALATE or a safe deferred state.
 
