@@ -585,6 +585,32 @@ Planner non-responsibilities:
 - execute an action
 - update trust
 
+Deterministic offline planner (Step 13):
+
+OfflinePlanner implements the same Planner protocol without a network call or API key. It uses an
+ordered, immutable rule table and word-boundary phrase matching. Higher-risk meanings are checked
+before routine meanings so a message containing both "newsletter" and "reset your password" is
+classified as account recovery rather than as a newsletter.
+
+Its conservative action map is:
+
+    account recovery  -> no_action; leave authority to safety policy
+    legal              -> no_action; leave authority to safety policy
+    financial          -> no_action; leave authority to safety policy
+    receipt            -> add the Receipts label
+    spam               -> propose trash; capability policy still requires ASK
+    newsletter         -> propose archive
+    meeting or request -> create a draft, never send it
+    personal           -> no_action
+    informational      -> propose mark_read
+    unknown            -> no_action
+
+If a preferred action is missing from the PlannerRequest allowlist, the planner returns NO_ACTION
+with an uncertainty reason. If even NO_ACTION is unavailable, it raises PlannerContractError rather
+than inventing another operation. The same input always yields the same PlannerOutput, which makes
+offline demos and evaluation fixtures reproducible. This planner is intentionally a limited
+baseline; the OpenAI semantic planner is a separate implementation of the same contract.
+
 If the API fails, times out, returns invalid JSON, returns an unknown action, or violates the schema, the pipeline records the failure and returns ESCALATE or a safe deferred state.
 
 

@@ -19,6 +19,11 @@ allowlist before application identity is attached. Every mailbox adapter impleme
 `execute(ExecutionCommand) -> ExecutionResult`. Contract guards reject disabled or under-floor
 commands and results that do not match the exact command identity.
 
+`OfflinePlanner` is the default reproducible planner for fixtures and demos. Ordered local rules
+classify a bounded set of intents and produce conservative typed proposals. Sensitive intents
+produce `NO_ACTION`, meetings and requests create drafts rather than sending, and unavailable
+actions fall back to `NO_ACTION` or a contract error. It has no network or side-effect access.
+
 ## Safety floors
 
 - External writes are never below `ASK`.
