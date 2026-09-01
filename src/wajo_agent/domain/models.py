@@ -417,12 +417,44 @@ class PreferenceContext(StrictModel):
 
 
 class PreferenceState(StrictModel):
-    context_key: str
-    alpha: int = 1
-    beta: int = 1
-    observations: int = 0
-    recent_feedback: tuple[FeedbackType, ...] = ()
-    cooldown_remaining: int = 0
+    """Current Beta evidence for one exact preference context."""
+
+    context_key: str = Field(min_length=1, max_length=100)
+    alpha: int = Field(default=1, ge=1)
+    beta: int = Field(default=1, ge=1)
+    observations: int = Field(default=0, ge=0)
+    recent_feedback: tuple[FeedbackType, ...] = Field(default=(), max_length=5)
+    cooldown_remaining: int = Field(default=0, ge=0)
+
+    @field_validator("context_key")
+    @classmethod
+    def clean_context_key(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("context_key cannot be blank")
+        return cleaned
+
+
+class PreferenceRecommendation(StrictModel):
+    """Explainable learner opinion; deterministic policy still has final authority."""
+
+    context_key: str = Field(min_length=1, max_length=100)
+    tier: AutonomyTier
+    alpha: int = Field(ge=1)
+    beta: int = Field(ge=1)
+    observations: int = Field(ge=0)
+    posterior_mean: float = Field(ge=0.0, le=1.0)
+    notify_probability: float = Field(ge=0.0, le=1.0)
+    silent_probability: float = Field(ge=0.0, le=1.0)
+    reasons: tuple[str, ...] = Field(min_length=1, max_length=10)
+
+    @field_validator("reasons")
+    @classmethod
+    def validate_reasons(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(value.strip() for value in values)
+        if any(not value for value in cleaned):
+            raise ValueError("recommendation reasons cannot be blank")
+        return cleaned
 
 
 class Decision(StrictModel):

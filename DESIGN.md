@@ -31,7 +31,10 @@ Preferences use a versioned exact-context key: action, intent, sender bucket, ha
 sender identity, recipient scope, and action variant. This prevents trust from leaking between
 senders or materially different forms of an action. Each context has a Beta posterior. Explicit
 approval increases alpha; rejection or undo increases beta and triggers cooldown. Silence is not
-feedback. Only internal reversible actions can reach `SILENT`.
+feedback. Promotion requires both minimum observations and posterior tail-probability thresholds.
+Only capabilities marked internal, reversible, enabled, non-destructive, and non-financial can
+receive a learned `SILENT` recommendation. The learner returns its evidence and reasons; policy
+retains final authority.
 
 ## Scope
 

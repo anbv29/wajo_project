@@ -758,12 +758,13 @@ Feedback updates:
       alpha += 1
 
 - edit proposal:
-      original_context beta += 2
-      edited_context alpha += 1
+      original_context beta += 2 and cooldown = at least 3
+      the later feedback-orchestration step may record the accepted edited proposal in its own
+      exact context; the learner itself never guesses that mapping
 
 - reject or undo:
       beta += 3
-      activate a cooldown that prevents immediate promotion
+      cooldown = at least 5
 
 - no explicit feedback:
       no update
@@ -786,7 +787,10 @@ SILENT:
     no negative feedback occurred in the last five observations;
     the context is an exact match.
 
-ASK remains the learner output for actions whose evidence is insufficient. The capability floor later ensures an external action cannot go below ASK even if the learner recommends SILENT due to a bug; the final validator independently checks this invariant.
+ASK remains the learner output for actions whose evidence is insufficient. The learner itself only
+permits SILENT for capabilities marked silent_eligible. The independent deterministic policy still
+applies its capability floor afterward; for example, strong preference evidence may recommend
+NOTIFY for a reply, but the external-action floor produces ASK.
 
 Why posterior probability instead of a simple approval percentage:
 
@@ -795,13 +799,24 @@ A raw ratio of one approval out of one observation is 100 percent but extremely 
 Example progression for repeated newsletter archive approval:
 
     Initial:       Beta(1,1)   -> ASK
-    Four approvals Beta(5,1)   -> possibly NOTIFY if threshold passes
+    Six approvals  Beta(7,1)   -> NOTIFY because P(theta > 0.7) exceeds 0.90
     More evidence  Beta(...)   -> remain NOTIFY until strict silent criteria pass
     Fifteen approvals Beta(16,1)
                   P(theta > 0.9) = 1 - 0.9^16, approximately 0.815
                   -> SILENT may be allowed for archive only
 
 A later rejection immediately increases beta, records a negative recent event, activates cooldown, and demotes the recommendation.
+
+The implemented learner returns an immutable PreferenceRecommendation rather than only a tier. It
+contains alpha, beta, observation count, posterior mean, the probability used for NOTIFY, the
+probability used for SILENT, and human-readable reasons. This makes every promotion or refusal
+auditable in the demo and measurable in the evaluation harness.
+
+LearningThresholds is frozen code-owned configuration. The model cannot edit evidence minimums,
+probability thresholds, feedback weights, or cooldown lengths. InMemoryPreferenceRepository makes
+the behavior executable before the SQLite repository arrives in Step 15. Duplicate feedback is not
+yet accepted by an application workflow; durable feedback identity and deduplication are added when
+feedback is wired end to end in Step 20.
 
 
 14. FOUR-WAY AUTONOMY ROUTER

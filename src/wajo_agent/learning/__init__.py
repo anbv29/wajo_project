@@ -5,10 +5,21 @@ from wajo_agent.learning.context import (
     normalize_email_address,
     recipient_scope_for,
 )
-from wajo_agent.learning.model import ContextualPreferenceLearner, beta_tail_probability
+from wajo_agent.learning.model import (
+    ContextualPreferenceLearner,
+    InMemoryPreferenceRepository,
+    LearningThresholds,
+    PreferenceDataError,
+    PreferenceRepository,
+    beta_tail_probability,
+)
 
 __all__ = [
     "ContextualPreferenceLearner",
+    "InMemoryPreferenceRepository",
+    "LearningThresholds",
+    "PreferenceDataError",
+    "PreferenceRepository",
     "action_variant_for",
     "beta_tail_probability",
     "build_preference_context",
