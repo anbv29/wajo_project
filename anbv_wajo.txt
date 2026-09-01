@@ -540,7 +540,9 @@ The planner receives:
 
 The planner does not receive Gmail tools or execution functions. It cannot send, archive, label, delete, or approve anything.
 
-The planner returns an ActionProposal with strict schema validation. A conceptual request looks like:
+The planner returns a PlannerOutput with strict schema validation. Application code validates the
+request allowlist and then binds that output to an email to create an ActionProposal. A conceptual
+request looks like:
 
     response = client.responses.create(
         model=config.planner_model,
@@ -550,6 +552,20 @@ The planner returns an ActionProposal with strict schema validation. A conceptua
     )
 
 The exact SDK syntax will be implemented against the installed SDK version and covered by a contract test.
+
+The implemented Step 12 boundary is:
+
+    class Planner(Protocol):
+        def plan(self, request: PlannerRequest) -> PlannerOutput: ...
+
+PlannerRequest contains the normalized EmailEnvelope, the exact enabled-action allowlist, whether
+normalization changed the content, and a literal marker declaring the content to be untrusted. A
+PlannerOutput is still model-owned data. validate_planner_output first checks that its action was
+allowed by this request; only bind_planner_output may then attach the application-owned email ID and
+turn it into an ActionProposal.
+
+PlannerError separates operational unavailability from a contract violation. Either failure is
+handled by the future agent loop as a safe inability to plan, never as permission to execute.
 
 Planner responsibilities:
 
@@ -1201,12 +1217,17 @@ Safety rules for Gmail testing:
 Adapter interface concept:
 
     class MailboxExecutor(Protocol):
-        def mark_read(command) -> ExecutionResult: ...
-        def add_label(command) -> ExecutionResult: ...
-        def archive(command) -> ExecutionResult: ...
-        def create_draft(command) -> ExecutionResult: ...
-        def trash(command) -> ExecutionResult: ...
-        def send_reply(command) -> ExecutionResult: ...
+        def execute(command: ExecutionCommand) -> ExecutionResult: ...
+
+The single method keeps orchestration independent of Gmail-specific methods. ExecutionCommand is a
+typed, immutable envelope containing exact proposal and decision identities, the action payload,
+the authorized autonomy tier, approval identity when required, and an idempotency key. ESCALATE is
+not a valid command tier. ASK cannot become a command without an approval ID.
+
+execute_checked validates capability floors and disabled actions before calling the adapter. It
+then verifies that the returned command ID, proposal ID, and idempotency key match the exact command.
+The full policy, approval hash, and idempotent state-machine validation are implemented later; this
+step defines the narrow interface they must feed.
 
 The mock and Gmail implementations satisfy the same contract tests. Policy tests never need Gmail credentials.
 

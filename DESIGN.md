@@ -14,6 +14,10 @@ policy, routes the decision, observes execution, records events, and learns from
 
 The planner is intentionally tool-less. Only the executor has side-effect capability, and it is
 reachable only through final policy, approval, payload-integrity, and idempotency validation.
+Every planner implements `plan(PlannerRequest) -> PlannerOutput`; the output must pass the request
+allowlist before application identity is attached. Every mailbox adapter implements only
+`execute(ExecutionCommand) -> ExecutionResult`. Contract guards reject disabled or under-floor
+commands and results that do not match the exact command identity.
 
 ## Safety floors
 

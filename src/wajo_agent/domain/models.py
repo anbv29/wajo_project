@@ -287,6 +287,31 @@ ActionPayload = Annotated[
 ]
 
 
+class PlannerRequest(StrictModel):
+    """Normalized, explicitly untrusted data passed across the planner boundary."""
+
+    request_id: str = Field(default_factory=lambda: new_id("plan_request"), max_length=512)
+    email: EmailEnvelope
+    allowed_actions: tuple[ActionType, ...] = Field(min_length=1)
+    normalization_changed: bool = False
+    content_trust: Literal["untrusted_email"] = "untrusted_email"
+
+    @field_validator("request_id")
+    @classmethod
+    def clean_request_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("request_id cannot be blank")
+        return cleaned
+
+    @field_validator("allowed_actions")
+    @classmethod
+    def unique_allowed_actions(cls, actions: tuple[ActionType, ...]) -> tuple[ActionType, ...]:
+        if len(actions) != len(set(actions)):
+            raise ValueError("allowed_actions cannot contain duplicates")
+        return actions
+
+
 class PlannerOutput(StrictModel):
     """The only action-shaped data the AI planner is allowed to return."""
 
@@ -491,14 +516,96 @@ class ApprovalRecord(StrictModel):
     consumed_at: datetime | None = None
 
 
+class ExecutionCommand(StrictModel):
+    """A policy-authorized instruction presented to a mailbox executor."""
+
+    command_id: str = Field(default_factory=lambda: new_id("command"), min_length=1, max_length=512)
+    idempotency_key: str = Field(min_length=1, max_length=512)
+    email_id: str = Field(min_length=1, max_length=512)
+    proposal_id: str = Field(min_length=1, max_length=512)
+    proposal_version: int = Field(ge=1)
+    decision_id: str = Field(min_length=1, max_length=512)
+    action_type: ActionType
+    payload: ActionPayload
+    authorized_tier: Literal[
+        AutonomyTier.SILENT,
+        AutonomyTier.NOTIFY,
+        AutonomyTier.ASK,
+    ]
+    approval_id: str | None = Field(default=None, min_length=1, max_length=512)
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator(
+        "command_id",
+        "idempotency_key",
+        "email_id",
+        "proposal_id",
+        "decision_id",
+    )
+    @classmethod
+    def clean_command_identity(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("execution command identity cannot be blank")
+        return cleaned
+
+    @field_validator("approval_id")
+    @classmethod
+    def clean_optional_approval(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("approval_id cannot be blank")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_execution_authority_shape(self) -> ExecutionCommand:
+        if self.payload.kind != self.action_type:
+            raise ValueError("execution payload kind must match action_type")
+        if self.authorized_tier == AutonomyTier.ASK and self.approval_id is None:
+            raise ValueError("an ASK command requires a bound approval")
+        if self.authorized_tier != AutonomyTier.ASK and self.approval_id is not None:
+            raise ValueError("only an ASK command may carry an approval")
+        return self
+
+
 class ExecutionResult(StrictModel):
     execution_id: str = Field(default_factory=lambda: new_id("execution"))
-    idempotency_key: str
-    proposal_id: str
+    command_id: str = Field(min_length=1, max_length=512)
+    idempotency_key: str = Field(min_length=1, max_length=512)
+    proposal_id: str = Field(min_length=1, max_length=512)
     state: ExecutionState
-    detail: str
+    detail: str = Field(min_length=1, max_length=1_000)
     provider_operation_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("command_id", "idempotency_key", "proposal_id", "detail")
+    @classmethod
+    def clean_result_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("execution result text cannot be blank")
+        return cleaned
+
+    @field_validator("provider_operation_id")
+    @classmethod
+    def clean_provider_operation_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @model_validator(mode="after")
+    def contains_terminal_executor_state(self) -> ExecutionResult:
+        terminal_states = {
+            ExecutionState.SUCCEEDED,
+            ExecutionState.FAILED_SAFE,
+            ExecutionState.UNKNOWN,
+        }
+        if self.state not in terminal_states:
+            raise ValueError("an execution result must contain a terminal executor state")
+        return self
 
 
 class AgentOutcome(StrictModel):
