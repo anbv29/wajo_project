@@ -152,8 +152,29 @@ The demo reaches `NOTIFY` and `SILENT` through real evidence-backed feedback ope
 seeding counters. It also demonstrates cold-start `ASK`, prompt-injection `ESCALATE`, and an
 ambiguous provider result becoming `UNKNOWN` without retry.
 
+## Optional Gmail adapter
+
+Gmail remains an infrastructure adapter behind the existing `MailboxExecutor` protocol. A
+dependency-free HTTPS transport accepts an injected OAuth access-token provider and never logs the
+token, request body, or email content. `GmailReader` requests one `format=full` message and maps its
+headers, text/HTML MIME parts, attachment metadata, provider message ID, and thread ID into the
+ordinary `EmailEnvelope`; it never downloads attachment bytes.
+
+`GmailMailboxExecutor` prepares read-state changes, archive, configured labels, trash, drafts, and
+approved allowlisted replies using the documented Gmail v1 REST shapes. Permanent deletion and
+unsupported external actions fail before a provider call. The adapter requests only
+`gmail.modify`, not the broader full-mailbox scope. It is disabled and dry-run by default; a dry-run
+returns `FAILED_SAFE` because no real effect occurred. Mutating timeouts, rate limits, server errors,
+malformed success responses, and mismatched provider IDs become `UNKNOWN` and are not retried.
+
+The CLI's `gmail-ingest` command permits a single authenticated read and agent analysis while
+leaving mutations dry-run. General CLI approval refuses Gmail-backed outcomes so it cannot consume
+authority against the mock adapter. Live effects require a dedicated harness to supply
+`GmailAdapterConfig(enabled=True, dry_run=False)`, explicit label IDs, an outbound recipient
+allowlist, and a dedicated test account.
+
 ## Scope
 
 The required path uses fixtures, SQLite, a mock mailbox executor, and a CLI. An OpenAI Responses
-API planner is included behind configuration. Gmail remains an optional adapter after the offline
-safety and evaluation gates pass.
+API planner and a disabled-by-default Gmail adapter are included behind configuration. The offline
+safety and evaluation gates remain the required submission path.

@@ -25,8 +25,22 @@ from wajo_agent.domain import (
     OutcomeRoute,
 )
 from wajo_agent.domain.models import utc_now
-from wajo_agent.execution import ExecutionError, ExecutionService, MockMailboxExecutor, MockOutcome
+from wajo_agent.execution import (
+    ExecutionError,
+    ExecutionService,
+    MailboxExecutor,
+    MockMailboxExecutor,
+    MockOutcome,
+)
 from wajo_agent.feedback import FeedbackError, FeedbackService
+from wajo_agent.gmail import (
+    EnvironmentAccessTokenProvider,
+    GmailAdapterConfig,
+    GmailError,
+    GmailHttpTransport,
+    GmailMailboxExecutor,
+    GmailReader,
+)
 from wajo_agent.learning import ContextualPreferenceLearner, build_preference_context
 from wajo_agent.planning import (
     OfflinePlanner,
@@ -148,6 +162,39 @@ def _ingest(context: typer.Context, email_file: Path, planner_name: str) -> None
     _emit_outcome(options, run.outcome)
 
 
+@app.command("gmail-ingest")
+def gmail_ingest(
+    context: typer.Context,
+    message_id: str = typer.Argument(...),
+    token_env: str = typer.Option("WAJO_GMAIL_ACCESS_TOKEN", "--token-env"),
+    planner: str = typer.Option("offline", "--planner", help="offline or openai"),
+) -> None:
+    """Read one Gmail message and analyze it with all Gmail mutations in dry-run."""
+    options = _options(context)
+    try:
+        transport = GmailHttpTransport(EnvironmentAccessTokenProvider(token_env))
+        email = GmailReader(transport).get_message(message_id)
+        gmail_executor = GmailMailboxExecutor(transport, GmailAdapterConfig())
+        with SQLiteStore(options.db_path) as store:
+            services = _services(
+                store,
+                options,
+                planner=_planner(planner, options.model),
+                mailbox_executor=gmail_executor,
+            )
+            run = services.agent.process(email)
+    except (
+        ValidationError,
+        ValueError,
+        StorageError,
+        DuplicateEmailError,
+        PlannerError,
+        GmailError,
+    ) as exc:
+        _fail(exc)
+    _emit_outcome(options, run.outcome)
+
+
 @app.command("inbox")
 def inbox(
     context: typer.Context,
@@ -206,6 +253,10 @@ def approve(
         with SQLiteStore(options.db_path) as store:
             services = _services(store, options)
             outcome = _approval_outcome(store, approval_id)
+            if outcome.email.source == "gmail":
+                raise ValueError(
+                    "CLI live Gmail mutations are disabled; use a dedicated test harness"
+                )
             proposal = _proposal(outcome)
             preference = _preference_tier(outcome)
             if not yes:
@@ -611,12 +662,13 @@ def _services(
     *,
     planner: Planner | None = None,
     outcomes: tuple[MockOutcome, ...] = (),
+    mailbox_executor: MailboxExecutor | None = None,
 ) -> Services:
     learner = ContextualPreferenceLearner(store)
     approvals = ApprovalService(store)
     execution = ExecutionService(
         store,
-        MockMailboxExecutor(outcomes),
+        mailbox_executor or MockMailboxExecutor(outcomes),
         approval_service=approvals,
     )
     feedback = FeedbackService(store, learner)

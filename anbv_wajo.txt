@@ -1452,43 +1452,66 @@ What is implemented in coding Step 20:
 
 Gmail is deliberately an adapter, not part of the domain or policy design. The core passes against fixtures first.
 
-The Gmail phase adds:
+What is implemented in coding Step 21:
 
-1. A dedicated test Google account.
-2. OAuth client configuration and local token handling.
-3. The minimum scopes required by the enabled actions.
-4. Mapping Gmail messages into EmailEnvelope.
-5. Read, label, archive, and draft implementations.
-6. Approved send only to a preconfigured test recipient.
-7. Provider IDs stored for reconciliation.
+- Gmail stays behind the MailboxExecutor protocol. The AI planner never receives a Gmail client,
+  OAuth token, or network tool. The already-built ExecutionService remains the only route from a
+  policy-approved command to any mailbox adapter.
+- GmailAccessTokenProvider and GmailTransport are small protocols. This makes authentication and
+  HTTP replaceable and makes every test credential-free. EnvironmentAccessTokenProvider reads a
+  short-lived token from WAJO_GMAIL_ACCESS_TOKEN at call time; it is never placed in a command,
+  domain model, audit event, exception message, or fixture.
+- GmailHttpTransport uses HTTPS and the Gmail v1 users/me base URL. It accepts only safe relative
+  paths, emits deterministic JSON, caps timeouts, sends the bearer token only in the Authorization
+  header, and validates every successful response as a JSON object.
+- HTTP 4xx rejection for a mutating request is treated as a definite pre-effect failure where the
+  status makes that conclusion safe. Timeouts, network loss after POST, HTTP 408/429, server errors,
+  malformed mutation responses, and mismatched provider identities are ambiguous. They become
+  UNKNOWN through ExecutionService and are never automatically retried.
+- GmailReader calls users.messages.get with format=full. The mapper treats the returned JSON as
+  untrusted: it requires message identity, internal date, payload, and From header; decodes base64url
+  text/plain and text/html MIME parts; extracts To/Cc recipients; retains thread identity; and maps
+  attachment name, type, size, inline flag, and provider attachment ID without downloading bytes.
+- The mapped object is the same EmailEnvelope used by fixtures, with source=gmail. Normalization,
+  injection scanning, planning, policy, approval, execution, audit, and learning therefore do not
+  contain Gmail-specific branches.
+- GmailMailboxExecutor prepares the current documented REST operations: messages.modify removes
+  UNREAD for mark-read, adds UNREAD for mark-unread, removes INBOX for archive, and adds an explicitly
+  configured label ID. messages.trash performs reversible trash. drafts.create receives a base64url
+  RFC 5322 message. messages.send is used only for an approved reply.
+- Custom labels are never guessed or created implicitly. GmailAdapterConfig requires an explicit
+  application label-name to Gmail label-ID mapping.
+- Outbound sending is doubly restricted. The ordinary capability floor already requires ASK and an
+  exact approval. The Gmail adapter checks that authority again and refuses every recipient not in
+  its configured test-recipient allowlist. Forward, unsubscribe, payment, account change, and
+  permanent delete are not implemented and fail before a provider request.
+- GmailAdapterConfig defaults to enabled=false and dry_run=true. In dry-run the full operation is
+  validated but no transport call is made. The result is FAILED_SAFE, not fake success, because no
+  mailbox effect actually occurred. NO_ACTION remains a local success requiring no Gmail call.
+- A live adapter requires both enabled=true and dry_run=false. Provider message/draft/send IDs are
+  returned as provider_operation_id so the existing execution record supports reconciliation.
+- The only CLI bridge is gmail-ingest. It obtains one Gmail message through the injected token and
+  runs the actual agent over it, but mutations stay dry-run. The general approve command refuses a
+  Gmail-backed outcome so it cannot accidentally consume real approval while using MockMailboxExecutor.
+  Live mutations must be enabled in a dedicated test harness after the offline gates pass.
+- GMAIL_SETUP.md describes dedicated-account configuration and token hygiene. .gitignore excludes
+  environment files, OAuth token files, client secrets, credential files, SQLite databases, and
+  local secret directories.
+- The adapter uses only https://www.googleapis.com/auth/gmail.modify. It never requests the broader
+  https://mail.google.com/ scope, which can permit immediate permanent deletion. A public product
+  using this restricted scope would still need Google's verification and possibly security review;
+  this take-home uses a dedicated test account rather than claiming production authorization.
+- scripts/check_gmail.py supplies a fake transport and runs without a network or Google account. It
+  verifies MIME mapping, attachment metadata, exact read/modify/trash/draft/send shapes, dry-run,
+  every supported operation, label mapping, approval and recipient enforcement, unsupported-action
+  refusal, definite versus ambiguous failure mapping, provider-ID reconciliation, missing-token
+  rejection, and the least-privilege scope constant.
 
-Safety rules for Gmail testing:
-
-- Gmail execution is disabled by default.
-- Dry-run mode is the default.
-- No production mailbox is required for review.
-- Sending is restricted to a test account and explicit approval.
-- Permanent delete and payment do not exist in the adapter.
-- Tokens are never committed.
-- Email bodies are redacted from ordinary logs where possible.
-- Pub/Sub push delivery is not required for the take-home; a manual sync command is sufficient.
-
-Adapter interface concept:
-
-    class MailboxExecutor(Protocol):
-        def execute(command: ExecutionCommand) -> ExecutionResult: ...
-
-The single method keeps orchestration independent of Gmail-specific methods. ExecutionCommand is a
-typed, immutable envelope containing exact proposal and decision identities, the action payload,
-the authorized autonomy tier, approval identity when required, and an idempotency key. ESCALATE is
-not a valid command tier. ASK cannot become a command without an approval ID.
-
-execute_checked validates capability floors and disabled actions before calling the adapter. It
-then verifies that the returned command ID, proposal ID, and idempotency key match the exact command.
-The full policy, approval hash, and idempotent state-machine validation are implemented later; this
-step defines the narrow interface they must feed.
-
-The mock and Gmail implementations satisfy the same contract tests. Policy tests never need Gmail credentials.
+The adapter deliberately does not implement an OAuth browser flow or store refresh tokens. That is
+an honest take-home boundary: a short-lived token is injected by local tooling, and production token
+refresh can implement GmailAccessTokenProvider without changing any agent or safety code. Pub/Sub
+push delivery is also outside the required path; one-message manual ingestion is enough to prove the
+adapter seam while the offline fixture path remains reproducible for reviewers.
 
 
 22. EVALUATION DATASETS

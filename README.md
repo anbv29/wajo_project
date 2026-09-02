@@ -42,5 +42,12 @@ before the command name. All mailbox effects in the offline demo use the scripte
 Human approval displays the exact bound payload and asks for confirmation. JSON automation must
 make consent explicit with `approve <approval-id> --yes`.
 
+Optional Gmail observation is documented in `GMAIL_SETUP.md`. It uses a dedicated test account,
+an injected short-lived access token, and dry-run mutations by default:
+
+```powershell
+uv run wajo --db gmail-test.db gmail-ingest <gmail-message-id>
+```
+
 See `DESIGN.md` for the concise technical design and `anbv_wajo.txt` for the exhaustive
 interviewer walkthrough.
