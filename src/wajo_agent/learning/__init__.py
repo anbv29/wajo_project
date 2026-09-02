@@ -11,6 +11,7 @@ from wajo_agent.learning.model import (
     LearningThresholds,
     PreferenceDataError,
     PreferenceRepository,
+    apply_feedback,
     beta_tail_probability,
 )
 
@@ -21,6 +22,7 @@ __all__ = [
     "PreferenceDataError",
     "PreferenceRepository",
     "action_variant_for",
+    "apply_feedback",
     "beta_tail_probability",
     "build_preference_context",
     "identity_hash",

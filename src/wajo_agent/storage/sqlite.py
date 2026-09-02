@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
@@ -19,13 +19,15 @@ from wajo_agent.domain import (
     ExecutionCommand,
     ExecutionRecord,
     ExecutionState,
+    FeedbackRecord,
+    FeedbackSubmission,
     FeedbackType,
     OutcomeRoute,
     PreferenceState,
 )
 from wajo_agent.domain.models import new_id, utc_now
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 FEEDBACK_LIST_ADAPTER = TypeAdapter(list[str])
 
 MIGRATION_V1 = """
@@ -173,11 +175,42 @@ PRAGMA user_version = 4;
 COMMIT;
 """
 
+MIGRATION_V5 = """
+BEGIN IMMEDIATE;
+
+CREATE TABLE feedback_records (
+    feedback_id TEXT PRIMARY KEY,
+    dedupe_key TEXT NOT NULL UNIQUE CHECK (
+        length(dedupe_key) = 64 AND dedupe_key NOT GLOB '*[^0-9a-f]*'
+    ),
+    decision_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    proposal_version INTEGER NOT NULL CHECK (proposal_version >= 1),
+    context_key TEXT NOT NULL,
+    feedback_type TEXT NOT NULL CHECK (
+        feedback_type IN ('approved', 'correct', 'edited', 'rejected', 'undone')
+    ),
+    actor TEXT NOT NULL,
+    source_reference TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_feedback_context_created
+    ON feedback_records (context_key, created_at);
+CREATE INDEX idx_feedback_decision
+    ON feedback_records (decision_id, proposal_version);
+
+PRAGMA user_version = 5;
+COMMIT;
+"""
+
 MIGRATIONS = {
     1: MIGRATION_V1,
     2: MIGRATION_V2,
     3: MIGRATION_V3,
     4: MIGRATION_V4,
+    5: MIGRATION_V5,
 }
 
 
@@ -211,6 +244,10 @@ class ExecutionStateConflictError(StorageError):
 
 class AgentRunStateConflictError(StorageError):
     """An agent run changed or completed before the requested transition."""
+
+
+class FeedbackConflictError(StorageError):
+    """A feedback identity was reused for contradictory evidence."""
 
 
 class SQLiteStore:
@@ -620,6 +657,20 @@ class SQLiteStore:
         ).fetchone()
         return None if row is None else _execution_from_row(row)
 
+    def get_execution(self, execution_id: str) -> ExecutionRecord | None:
+        """Return one durable execution by its application identity."""
+        row = self._connection.execute(
+            """
+            SELECT execution_id, idempotency_key, command_json, state, attempt_count,
+                   detail, provider_operation_id, created_at, updated_at, started_at,
+                   completed_at
+            FROM executions
+            WHERE execution_id = ?
+            """,
+            (execution_id.strip(),),
+        ).fetchone()
+        return None if row is None else _execution_from_row(row)
+
     def claim_execution(
         self,
         record: ExecutionRecord,
@@ -866,6 +917,113 @@ class SQLiteStore:
                 occurred_at=occurred_at,
             )
 
+    def commit_feedback(
+        self,
+        submission: FeedbackSubmission,
+        *,
+        update: Callable[[PreferenceState], PreferenceState],
+    ) -> tuple[FeedbackRecord, bool]:
+        """Deduplicate and atomically commit feedback, preference state, and events."""
+        with self._write_transaction():
+            rows = self._connection.execute(
+                """
+                SELECT record_json
+                FROM feedback_records
+                WHERE feedback_id = ? OR dedupe_key = ?
+                """,
+                (submission.feedback_id, submission.dedupe_key),
+            ).fetchall()
+            if len(rows) > 1:
+                raise FeedbackConflictError("feedback ID and dedupe key identify different records")
+            if rows:
+                existing = _feedback_from_row(rows[0])
+                if not _same_feedback_semantics(existing, submission):
+                    raise FeedbackConflictError(
+                        "feedback identity was reused for different evidence"
+                    )
+                return existing, False
+
+            previous = self.get_preference(submission.context_key)
+            updated = update(previous)
+            record = FeedbackRecord.model_validate(
+                {
+                    **submission.model_dump(mode="python"),
+                    "previous_state": previous,
+                    "updated_state": updated,
+                }
+            )
+            record_json = _canonical_json(record.model_dump(mode="json"))
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO feedback_records (
+                        feedback_id, dedupe_key, decision_id, proposal_id,
+                        proposal_version, context_key, feedback_type, actor,
+                        source_reference, record_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.feedback_id,
+                        record.dedupe_key,
+                        record.decision_id,
+                        record.proposal_id,
+                        record.proposal_version,
+                        record.context_key,
+                        record.feedback_type.value,
+                        record.actor,
+                        record.source_reference,
+                        record_json,
+                        record.created_at.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise FeedbackConflictError("feedback identity already exists") from exc
+
+            self._upsert_preference(updated)
+            self._insert_event(
+                stream_id=f"feedback:{record.feedback_id}",
+                event_type="feedback.recorded",
+                payload={
+                    "feedback_id": record.feedback_id,
+                    "decision_id": record.decision_id,
+                    "proposal_id": record.proposal_id,
+                    "proposal_version": record.proposal_version,
+                    "context_key": record.context_key,
+                    "feedback_type": record.feedback_type.value,
+                    "actor": record.actor,
+                    "source_reference": record.source_reference,
+                },
+                event_version=1,
+                event_id=None,
+                occurred_at=record.created_at,
+            )
+            self._insert_event(
+                stream_id=f"preference:{record.context_key}",
+                event_type="preference.updated",
+                payload={
+                    "feedback_id": record.feedback_id,
+                    "feedback_type": record.feedback_type.value,
+                    "previous_alpha": previous.alpha,
+                    "previous_beta": previous.beta,
+                    "updated_alpha": updated.alpha,
+                    "updated_beta": updated.beta,
+                    "observations": updated.observations,
+                    "cooldown_remaining": updated.cooldown_remaining,
+                },
+                event_version=1,
+                event_id=None,
+                occurred_at=record.created_at,
+            )
+        return record, True
+
+    def get_feedback(self, feedback_id: str) -> FeedbackRecord | None:
+        """Load one durable feedback receipt."""
+        row = self._connection.execute(
+            "SELECT record_json FROM feedback_records WHERE feedback_id = ?",
+            (feedback_id.strip(),),
+        ).fetchone()
+        return None if row is None else _feedback_from_row(row)
+
     def close(self) -> None:
         self._connection.close()
 
@@ -996,3 +1154,24 @@ def _execution_from_row(row: sqlite3.Row) -> ExecutionRecord:
 
 def _execution_stream_id(execution_id: str) -> str:
     return f"execution:{execution_id}"
+
+
+def _feedback_from_row(row: sqlite3.Row) -> FeedbackRecord:
+    try:
+        return FeedbackRecord.model_validate_json(str(row["record_json"]))
+    except ValidationError as exc:
+        raise StorageError("stored feedback is malformed") from exc
+
+
+def _same_feedback_semantics(
+    existing: FeedbackRecord,
+    submission: FeedbackSubmission,
+) -> bool:
+    return (
+        existing.dedupe_key == submission.dedupe_key
+        and existing.decision_id == submission.decision_id
+        and existing.proposal_id == submission.proposal_id
+        and existing.proposal_version == submission.proposal_version
+        and existing.context_key == submission.context_key
+        and existing.feedback_type == submission.feedback_type
+    )

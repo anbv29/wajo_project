@@ -1088,8 +1088,9 @@ What is implemented in coding Step 15:
   lets a future reader deliberately upcast an older payload instead of silently guessing its shape.
 - SQLiteStore opens or creates a versioned database. PRAGMA user_version is the migration marker.
   Step 15 introduced schema version 1, Step 16 added approvals in version 2, Step 17 added
-  executions in version 3, and Step 18 adds durable inbound run claims in version 4. A database
-  from a newer application version is rejected so older code cannot corrupt it.
+  executions in version 3, Step 18 added durable inbound run claims in version 4, and Step 19 adds
+  exactly-once feedback receipts in version 5. A database from a newer application version is
+  rejected so older code cannot corrupt it.
 - audit_events is the append-only source of truth. Its primary key prevents duplicate event IDs,
   its stream-and-sequence uniqueness preserves ordering, and database triggers reject UPDATE and
   DELETE even when a caller bypasses Python and sends SQL directly.
@@ -1102,10 +1103,11 @@ What is implemented in coding Step 15:
 - Connections enable foreign keys, a 5,000 millisecond busy timeout, WAL journal mode, and NORMAL
   synchronous mode. No LLM or mailbox call occurs inside a database transaction.
 
-The Step 15 schema intentionally began with only audit_events and preference_states. Step 16 adds
-approvals through migration 2, Step 17 adds executions through migration 3, and Step 18 adds
-agent_runs through migration 4. Separate email, decision, and feedback-deduplication projections
-are still added with later workflows that own their invariants. This keeps the schema honest.
+The Step 15 schema intentionally began with only audit_events and preference_states. Step 16 added
+approvals through migration 2, Step 17 added executions through migration 3, Step 18 added
+agent_runs through migration 4, and Step 19 adds feedback_records through migration 5. Separate
+email and decision projections can still be added with later workflows that own their invariants.
+This keeps the schema honest.
 
 Core event types:
 
@@ -1319,6 +1321,37 @@ For SILENT:
 - negative feedback forces immediate demotion and cooldown
 
 Duplicate feedback events are ignored using a stable feedback identity. If storage fails, the UI reports that feedback was not committed rather than pretending learning succeeded.
+
+What is implemented in coding Step 19:
+
+- Feedback is accepted through two narrow application-service methods. Approval feedback accepts
+  APPROVED, REJECTED, or EDITED only for an ASK decision. Execution feedback accepts CORRECT or
+  UNDONE only for a SILENT or NOTIFY decision. There is deliberately no public "learn anything"
+  method that can bypass workflow evidence.
+- Every request is bound to the exact email, proposal ID, proposal version, and decision. Approval
+  feedback must also match the durable approval payload hash and a status that proves the event:
+  GRANTED or CONSUMED proves approval, REJECTED proves rejection, and INVALIDATED proves an edit.
+- Post-action feedback requires a durable SUCCEEDED execution whose complete command matches the
+  email and proposal. UNDONE is rejected for capabilities that are not reversible. A failed,
+  unknown, missing, or unrelated execution is never accepted as learning evidence.
+- A stable semantic SHA-256 deduplication key covers decision ID, proposal ID, proposal version,
+  and feedback type. It intentionally excludes a button-click ID and actor, so a transport retry
+  with a new request ID cannot teach the same fact twice. An exact duplicate returns the original
+  durable receipt with applied=false.
+- FeedbackRecord stores the source evidence reference and the complete preference transition:
+  previous state, updated state, feedback type, actor, and UTC timestamp. This makes the learning
+  result inspectable instead of leaving only a changed counter.
+- SQLite migration 5 adds feedback_records with unique feedback and semantic-deduplication keys.
+  commit_feedback starts BEGIN IMMEDIATE before reading the latest preference. It then writes the
+  receipt, preference projection, feedback.recorded event, and preference.updated event in one
+  transaction. Any failure rolls back all four writes, and concurrent writers cannot lose an
+  observation by reading the same old state.
+- The Beta update remains pure and bounded. APPROVED and CORRECT add positive evidence. EDITED,
+  REJECTED, and UNDONE add weighted negative evidence and activate the existing cooldown rules.
+  The hard capability and policy floors are never modified. Silence still produces no update.
+- The focused offline checks cover missing evidence, every feedback family, status validation,
+  exact binding, weighted updates, cooldown, duplicate calls with both identical and new request
+  IDs, audit streams, context isolation, and restart durability.
 
 
 20. COMMAND-LINE INTERFACE AND DEMONSTRATION EXPERIENCE

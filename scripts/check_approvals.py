@@ -307,7 +307,7 @@ def main() -> None:
         finally:
             legacy_connection.close()
         with SQLiteStore(legacy_path) as migrated:
-            _require(migrated.schema_version == 4, "version-1 database did not migrate")
+            _require(migrated.schema_version == 5, "version-1 database did not migrate")
             migrated_request = ApprovalService(migrated, clock=clock).request(original, decision)
             _require(
                 migrated.get_approval(migrated_request.approval_id) == migrated_request,

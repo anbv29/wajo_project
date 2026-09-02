@@ -196,27 +196,44 @@ class ContextualPreferenceLearner:
     def record(self, context: PreferenceContext, feedback: FeedbackType) -> PreferenceState:
         """Apply one explicit feedback observation to this exact context."""
         state = self.state_for(context)
-        thresholds = self.thresholds
-        alpha = state.alpha
-        beta = state.beta
-        cooldown = max(0, state.cooldown_remaining - 1)
-
-        if feedback in {FeedbackType.APPROVED, FeedbackType.CORRECT}:
-            alpha += 1
-        elif feedback == FeedbackType.EDITED:
-            beta += thresholds.edited_beta_weight
-            cooldown = max(cooldown, thresholds.edited_cooldown)
-        elif feedback in {FeedbackType.REJECTED, FeedbackType.UNDONE}:
-            beta += thresholds.negative_beta_weight
-            cooldown = max(cooldown, thresholds.negative_cooldown)
-
-        updated = PreferenceState(
-            context_key=context.key,
-            alpha=alpha,
-            beta=beta,
-            observations=state.observations + 1,
-            recent_feedback=(*state.recent_feedback[-4:], feedback),
-            cooldown_remaining=cooldown,
-        )
+        updated = self.updated_state(state, feedback)
         self.repository.save_preference(updated)
         return updated
+
+    def updated_state(
+        self,
+        state: PreferenceState,
+        feedback: FeedbackType,
+    ) -> PreferenceState:
+        """Calculate evidence without writing, for an enclosing atomic transaction."""
+        return apply_feedback(state, feedback, thresholds=self.thresholds)
+
+
+def apply_feedback(
+    state: PreferenceState,
+    feedback: FeedbackType,
+    *,
+    thresholds: LearningThresholds,
+) -> PreferenceState:
+    """Pure Beta-evidence transition shared by memory and transactional repositories."""
+    alpha = state.alpha
+    beta = state.beta
+    cooldown = max(0, state.cooldown_remaining - 1)
+
+    if feedback in {FeedbackType.APPROVED, FeedbackType.CORRECT}:
+        alpha += 1
+    elif feedback == FeedbackType.EDITED:
+        beta += thresholds.edited_beta_weight
+        cooldown = max(cooldown, thresholds.edited_cooldown)
+    elif feedback in {FeedbackType.REJECTED, FeedbackType.UNDONE}:
+        beta += thresholds.negative_beta_weight
+        cooldown = max(cooldown, thresholds.negative_cooldown)
+
+    return PreferenceState(
+        context_key=state.context_key,
+        alpha=alpha,
+        beta=beta,
+        observations=state.observations + 1,
+        recent_feedback=(*state.recent_feedback[-4:], feedback),
+        cooldown_remaining=cooldown,
+    )

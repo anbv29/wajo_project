@@ -499,6 +499,65 @@ class PreferenceRecommendation(StrictModel):
         return cleaned
 
 
+class FeedbackSubmission(StrictModel):
+    """One normalized explicit-feedback command before preference evidence is updated."""
+
+    feedback_id: str = Field(default_factory=lambda: new_id("feedback"), max_length=512)
+    dedupe_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decision_id: str = Field(min_length=1, max_length=512)
+    proposal_id: str = Field(min_length=1, max_length=512)
+    proposal_version: int = Field(ge=1)
+    context_key: str = Field(min_length=1, max_length=100)
+    feedback_type: FeedbackType
+    actor: str = Field(min_length=1, max_length=200)
+    source_reference: str = Field(min_length=1, max_length=512)
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator(
+        "feedback_id",
+        "decision_id",
+        "proposal_id",
+        "context_key",
+        "actor",
+        "source_reference",
+    )
+    @classmethod
+    def clean_feedback_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("feedback identity cannot be blank")
+        return cleaned
+
+    @field_validator("created_at")
+    @classmethod
+    def require_aware_feedback_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("feedback timestamp must include a timezone")
+        return value.astimezone(UTC)
+
+
+class FeedbackRecord(FeedbackSubmission):
+    """Durable feedback receipt containing the exact evidence transition it caused."""
+
+    previous_state: PreferenceState
+    updated_state: PreferenceState
+
+    @model_validator(mode="after")
+    def validate_preference_transition(self) -> FeedbackRecord:
+        if (
+            self.previous_state.context_key != self.context_key
+            or self.updated_state.context_key != self.context_key
+        ):
+            raise ValueError("feedback states belong to another preference context")
+        if self.updated_state.observations != self.previous_state.observations + 1:
+            raise ValueError("feedback must add exactly one observation")
+        if not self.updated_state.recent_feedback:
+            raise ValueError("updated preference must retain recent feedback")
+        if self.updated_state.recent_feedback[-1] != self.feedback_type:
+            raise ValueError("updated preference does not contain this feedback")
+        return self
+
+
 class AuditEvent(StrictModel):
     """One immutable event loaded from the append-only audit stream."""
 

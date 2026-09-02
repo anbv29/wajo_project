@@ -52,14 +52,24 @@ Only capabilities marked internal, reversible, enabled, non-destructive, and non
 receive a learned `SILENT` recommendation. The learner returns its evidence and reasons; policy
 retains final authority.
 
+Feedback enters through two evidence-backed workflows, not a generic learning endpoint. Approval
+feedback must match a durable granted, consumed, rejected, or invalidated approval for the exact
+proposal version. Post-action feedback must match a successful autonomous execution and its exact
+command; undo evidence additionally requires a reversible capability. A semantic SHA-256 key makes
+repeated clicks and retried requests exactly-once even when they carry a new UI feedback ID.
+
+SQLite takes a write lock before loading the latest contextual preference. It then commits the
+feedback receipt, previous and updated Beta state, preference projection, and both audit events in
+one transaction. A duplicate returns the original receipt without adding another observation.
+
 ## Durable state and audit
 
 `SQLiteStore` is the durable implementation of the learner's preference repository and the local
 append-only audit store. Ordered migrations are tracked through `PRAGMA user_version`: version 1
 adds events and preferences, version 2 adds approvals, version 3 adds executions, and version 4 adds
-durable agent-run claims. A database created by a newer application is rejected instead of guessed
-at. Connections enable foreign keys, WAL journal mode, a five-second busy timeout, and short explicit
-write transactions.
+durable agent-run claims. Version 5 adds exactly-once feedback receipts. A database created by a
+newer application is rejected instead of guessed at. Connections enable foreign keys, WAL journal
+mode, a five-second busy timeout, and short explicit write transactions.
 
 The `audit_events` table assigns an independent monotonically increasing sequence within each
 stream. Database triggers reject updates and deletes, so append-only behavior still holds if code
