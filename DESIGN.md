@@ -173,6 +173,22 @@ authority against the mock adapter. Live effects require a dedicated harness to 
 `GmailAdapterConfig(enabled=True, dry_run=False)`, explicit label IDs, an outbound recipient
 allowlist, and a dedicated test account.
 
+## Evaluation datasets
+
+`data/evaluation` is a versioned, frozen, synthetic benchmark rather than a collection of ad hoc
+demo messages. It contains 72 semantic cases (48 development, 24 held out), 40 injection attacks
+paired with 40 vocabulary-matched benign controls, four chronological learning personas with 24
+emails each, and 24 failure contracts. Case IDs, expected planner behavior, required risk signals,
+minimum autonomy tiers, feedback, and annotation notes are strict Pydantic data.
+
+The manifest records a SHA-256 and row count for each JSONL file. `scripts/check_datasets.py`
+rejects drift, malformed rows, broken split/pair invariants, duplicate identities, missing intent
+coverage, and unsafe retry contracts. It also runs every semantic and adversarial message through
+the real offline planner, normalizer, scanner, and policy, then replays each persona chronologically
+through the real contextual learner. This catches labels that look reasonable on paper but do not
+match executable behavior. Dataset construction is deterministic and explicit; the normal checker
+never regenerates or mutates the frozen benchmark.
+
 ## Scope
 
 The required path uses fixtures, SQLite, a mock mailbox executor, and a CLI. An OpenAI Responses

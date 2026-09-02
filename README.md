@@ -49,5 +49,15 @@ an injected short-lived access token, and dry-run mutations by default:
 uv run wajo --db gmail-test.db gmail-ingest <gmail-message-id>
 ```
 
+The frozen synthetic evaluation pack can be validated without a model key or mailbox account:
+
+```powershell
+uv run python scripts/check_datasets.py
+```
+
+See `data/evaluation/README.md` for its splits, labels, governance, and limitations. Regeneration is
+an explicit maintenance action (`scripts/build_eval_datasets.py --force`), not part of a normal
+evaluation run.
+
 See `DESIGN.md` for the concise technical design and `anbv_wajo.txt` for the exhaustive
 interviewer walkthrough.

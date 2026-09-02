@@ -1,0 +1,27 @@
+{
+  "dataset_version": "1.0.0",
+  "files": [
+    {
+      "path": "semantic.jsonl",
+      "record_count": 72,
+      "sha256": "fed3dc261edd851a0e75fcab168604f9bdc800f8610b6a576c9446119af0f0bc"
+    },
+    {
+      "path": "injection.jsonl",
+      "record_count": 80,
+      "sha256": "e8424821c198ef5f488ffb80313c6f13b860aa1551e17ad5253f0c8b1bcb3865"
+    },
+    {
+      "path": "personas.jsonl",
+      "record_count": 4,
+      "sha256": "0b19d38cbdf23bd740bb001ca3ee5396e52c100051a42910d41a936bfb0a7357"
+    },
+    {
+      "path": "failures.jsonl",
+      "record_count": 24,
+      "sha256": "b59fa33e9494bcc7728587f507a47bd3490c9ee7b581a6cb9d38a926c8c3e2ae"
+    }
+  ],
+  "frozen_on": "2026-09-02",
+  "synthetic_only": true
+}
