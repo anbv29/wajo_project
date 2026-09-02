@@ -183,17 +183,7 @@ class ApprovalService:
         proposal: ActionProposal,
     ) -> ApprovalRecord:
         """Atomically consume a granted approval exactly once for its bound proposal."""
-        now = self._now()
-        record = self._active_record(approval_id, now)
-        _require_status(record, ApprovalStatus.GRANTED)
-        _verify_binding(record, proposal)
-        consumed = record.model_copy(
-            update={
-                "status": ApprovalStatus.CONSUMED,
-                "consumed_at": now,
-                "updated_at": now,
-            }
-        )
+        consumed = self.prepare_consumption(approval_id, proposal)
         return self._transition(
             consumed,
             expected_statuses=(ApprovalStatus.GRANTED,),
@@ -202,6 +192,24 @@ class ApprovalService:
                 "approval_id": consumed.approval_id,
                 "payload_hash": consumed.payload_hash,
             },
+        )
+
+    def prepare_consumption(
+        self,
+        approval_id: str,
+        proposal: ActionProposal,
+    ) -> ApprovalRecord:
+        """Build a checked consumed record for an enclosing atomic execution claim."""
+        now = self._now()
+        record = self._active_record(approval_id, now)
+        _require_status(record, ApprovalStatus.GRANTED)
+        _verify_binding(record, proposal)
+        return record.model_copy(
+            update={
+                "status": ApprovalStatus.CONSUMED,
+                "consumed_at": now,
+                "updated_at": now,
+            }
         )
 
     def replace_for_edit(

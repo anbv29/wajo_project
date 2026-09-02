@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -15,12 +15,16 @@ from wajo_agent.domain import (
     ApprovalRecord,
     ApprovalStatus,
     AuditEvent,
+    AutonomyTier,
+    ExecutionCommand,
+    ExecutionRecord,
+    ExecutionState,
     FeedbackType,
     PreferenceState,
 )
 from wajo_agent.domain.models import new_id, utc_now
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 FEEDBACK_LIST_ADAPTER = TypeAdapter(list[str])
 
 MIGRATION_V1 = """
@@ -105,9 +109,47 @@ PRAGMA user_version = 2;
 COMMIT;
 """
 
+MIGRATION_V3 = """
+BEGIN IMMEDIATE;
+
+CREATE TABLE executions (
+    execution_id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE CHECK (
+        length(idempotency_key) = 64 AND idempotency_key NOT GLOB '*[^0-9a-f]*'
+    ),
+    command_id TEXT NOT NULL UNIQUE,
+    proposal_id TEXT NOT NULL,
+    proposal_version INTEGER NOT NULL CHECK (proposal_version >= 1),
+    approval_id TEXT REFERENCES approvals(approval_id),
+    state TEXT NOT NULL CHECK (state IN ('executing', 'succeeded', 'failed_safe', 'unknown')),
+    command_json TEXT NOT NULL CHECK (json_valid(command_json)),
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 1),
+    detail TEXT NOT NULL CHECK (length(detail) BETWEEN 1 AND 1000),
+    provider_operation_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    CHECK (updated_at >= created_at),
+    CHECK (started_at >= created_at),
+    CHECK (state = 'executing' OR completed_at IS NOT NULL),
+    CHECK (state != 'executing' OR completed_at IS NULL),
+    CHECK (completed_at IS NULL OR completed_at >= started_at)
+);
+
+CREATE INDEX idx_executions_proposal
+    ON executions (proposal_id, proposal_version);
+CREATE INDEX idx_executions_state
+    ON executions (state, updated_at);
+
+PRAGMA user_version = 3;
+COMMIT;
+"""
+
 MIGRATIONS = {
     1: MIGRATION_V1,
     2: MIGRATION_V2,
+    3: MIGRATION_V3,
 }
 
 
@@ -133,6 +175,10 @@ class ApprovalStateConflictError(StorageError):
 
 class DuplicateApprovalError(StorageError):
     """An approval identifier has already been committed."""
+
+
+class ExecutionStateConflictError(StorageError):
+    """An execution changed between observation and attempted transition."""
 
 
 class SQLiteStore:
@@ -194,6 +240,11 @@ class SQLiteStore:
             self._connection.execute("BEGIN IMMEDIATE")
             yield
             self._connection.execute("COMMIT")
+        except sqlite3.DatabaseError as exc:
+            if self._connection.in_transaction:
+                with suppress(sqlite3.DatabaseError):
+                    self._connection.execute("ROLLBACK")
+            raise StorageError("SQLite write transaction failed") from exc
         except Exception:
             if self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
@@ -520,6 +571,165 @@ class SQLiteStore:
             f"approval is no longer in an expected state: {record.approval_id}"
         )
 
+    def get_execution_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> ExecutionRecord | None:
+        """Return the durable execution for an effect key, when one exists."""
+        row = self._connection.execute(
+            """
+            SELECT execution_id, idempotency_key, command_json, state, attempt_count,
+                   detail, provider_operation_id, created_at, updated_at, started_at,
+                   completed_at
+            FROM executions
+            WHERE idempotency_key = ?
+            """,
+            (idempotency_key.strip(),),
+        ).fetchone()
+        return None if row is None else _execution_from_row(row)
+
+    def claim_execution(
+        self,
+        record: ExecutionRecord,
+        *,
+        consumed_approval: ApprovalRecord | None,
+    ) -> tuple[ExecutionRecord, bool]:
+        """Claim a new effect and consume ASK authority in the same transaction."""
+        if record.state != ExecutionState.EXECUTING:
+            raise ValueError("new execution claim must be in EXECUTING state")
+        if record.command.authorized_tier == AutonomyTier.ASK:
+            if consumed_approval is None:
+                raise ValueError("ASK execution claim requires consumed approval evidence")
+            if consumed_approval.status != ApprovalStatus.CONSUMED:
+                raise ValueError("execution claim requires a prepared consumed approval")
+            if record.command.approval_id != consumed_approval.approval_id:
+                raise ValueError("command and consumed approval identities differ")
+            if (
+                record.command.proposal_id != consumed_approval.proposal_id
+                or record.command.proposal_version != consumed_approval.proposal_version
+            ):
+                raise ValueError("command and consumed approval proposals differ")
+        elif consumed_approval is not None or record.command.approval_id is not None:
+            raise ValueError("non-ASK execution cannot consume an approval")
+
+        with self._write_transaction():
+            existing = self.get_execution_by_idempotency_key(record.command.idempotency_key)
+            if existing is not None:
+                return existing, False
+
+            if consumed_approval is not None:
+                self._update_approval(
+                    consumed_approval,
+                    expected_statuses=(ApprovalStatus.GRANTED,),
+                )
+                self._insert_event(
+                    stream_id=_approval_stream_id(consumed_approval.approval_id),
+                    event_type="approval.consumed",
+                    payload={
+                        "approval_id": consumed_approval.approval_id,
+                        "payload_hash": consumed_approval.payload_hash,
+                        "execution_id": record.execution_id,
+                    },
+                    event_version=1,
+                    event_id=None,
+                    occurred_at=consumed_approval.updated_at,
+                )
+
+            self._insert_execution(record)
+            self._insert_event(
+                stream_id=_execution_stream_id(record.execution_id),
+                event_type="execution.started",
+                payload={
+                    "execution_id": record.execution_id,
+                    "idempotency_key": record.command.idempotency_key,
+                    "proposal_id": record.command.proposal_id,
+                    "proposal_version": record.command.proposal_version,
+                    "action_type": record.command.action_type.value,
+                },
+                event_version=1,
+                event_id=None,
+                occurred_at=record.started_at,
+            )
+        return record, True
+
+    def complete_execution(self, record: ExecutionRecord) -> ExecutionRecord:
+        """Move one claimed execution to a terminal state and append its result event."""
+        if record.state == ExecutionState.EXECUTING:
+            raise ValueError("execution completion requires a terminal state")
+        with self._write_transaction():
+            cursor = self._connection.execute(
+                """
+                UPDATE executions
+                SET state = ?, detail = ?, provider_operation_id = ?, updated_at = ?,
+                    completed_at = ?
+                WHERE execution_id = ?
+                  AND idempotency_key = ?
+                  AND state = 'executing'
+                """,
+                (
+                    record.state.value,
+                    record.detail,
+                    record.provider_operation_id,
+                    record.updated_at.isoformat(),
+                    _optional_time(record.completed_at),
+                    record.execution_id,
+                    record.command.idempotency_key,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ExecutionStateConflictError(
+                    f"execution is no longer active: {record.execution_id}"
+                )
+            self._insert_event(
+                stream_id=_execution_stream_id(record.execution_id),
+                event_type=f"execution.{record.state.value}",
+                payload={
+                    "execution_id": record.execution_id,
+                    "state": record.state.value,
+                    "detail": record.detail,
+                    "provider_operation_id": record.provider_operation_id,
+                },
+                event_version=1,
+                event_id=None,
+                occurred_at=record.completed_at or record.updated_at,
+            )
+        return record
+
+    def _insert_execution(self, record: ExecutionRecord) -> None:
+        command_json = _canonical_json(record.command.model_dump(mode="json"))
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO executions (
+                    execution_id, idempotency_key, command_id, proposal_id,
+                    proposal_version, approval_id, state, command_json, attempt_count,
+                    detail, provider_operation_id, created_at, updated_at, started_at,
+                    completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.execution_id,
+                    record.command.idempotency_key,
+                    record.command.command_id,
+                    record.command.proposal_id,
+                    record.command.proposal_version,
+                    record.command.approval_id,
+                    record.state.value,
+                    command_json,
+                    record.attempt_count,
+                    record.detail,
+                    record.provider_operation_id,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                    record.started_at.isoformat(),
+                    _optional_time(record.completed_at),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ExecutionStateConflictError(
+                "execution identity or idempotency key already exists"
+            ) from exc
+
     def close(self) -> None:
         self._connection.close()
 
@@ -623,3 +833,30 @@ def _approval_stream_id(approval_id: str) -> str:
 
 def _optional_time(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat()
+
+
+def _execution_from_row(row: sqlite3.Row) -> ExecutionRecord:
+    try:
+        command = ExecutionCommand.model_validate_json(str(row["command_json"]))
+        if command.idempotency_key != str(row["idempotency_key"]):
+            raise StorageError("stored execution key differs from its command")
+        return ExecutionRecord.model_validate(
+            {
+                "execution_id": str(row["execution_id"]),
+                "command": command,
+                "state": str(row["state"]),
+                "attempt_count": int(row["attempt_count"]),
+                "detail": str(row["detail"]),
+                "provider_operation_id": row["provider_operation_id"],
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+                "started_at": str(row["started_at"]),
+                "completed_at": row["completed_at"],
+            }
+        )
+    except ValidationError as exc:
+        raise StorageError("stored execution is malformed") from exc
+
+
+def _execution_stream_id(execution_id: str) -> str:
+    return f"execution:{execution_id}"

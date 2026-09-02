@@ -48,6 +48,7 @@ class FakePlanner:
 class FakeExecutor:
     def execute(self, command: ExecutionCommand) -> ExecutionResult:
         return ExecutionResult(
+            execution_id=command.execution_id,
             command_id=command.command_id,
             idempotency_key=command.idempotency_key,
             proposal_id=command.proposal_id,
@@ -59,6 +60,7 @@ class FakeExecutor:
 class WrongResultExecutor:
     def execute(self, command: ExecutionCommand) -> ExecutionResult:
         return ExecutionResult(
+            execution_id=command.execution_id,
             command_id="wrong-command",
             idempotency_key=command.idempotency_key,
             proposal_id=command.proposal_id,

@@ -1041,6 +1041,40 @@ Retry rules:
 - External send with an unknown outcome does not automatically retry.
 - The mock executor can inject every failure classification for testing.
 
+What is implemented in coding Step 17:
+
+- effect_idempotency_key hashes canonical, versioned JSON containing mailbox identity, provider
+  message identity, proposal version, action type, and the complete typed action payload. It excludes
+  display-only summary text, random command IDs, and autonomy tier because these do not alter the
+  requested mailbox effect.
+- ExecutionService is the only application service that calls a MailboxExecutor. Immediately before
+  execution, it revalidates the stored Decision against the exact proposal, current risk assessment,
+  and current preference tier. ESCALATE never executes, ASK requires approval, and SILENT/NOTIFY
+  cannot carry an approval.
+- SQLite migration 3 creates executions with a unique idempotency key, exact serialized command,
+  lifecycle state, provider operation identity, attempt count, and UTC timing evidence.
+- Before the adapter call, the service commits an EXECUTING claim and execution.started audit event.
+  For ASK actions, the same transaction compare-and-sets GRANTED to CONSUMED and appends the linked
+  approval.consumed event. Failure of either write rolls back the entire claim.
+- The database transaction closes before the adapter is called. No lock is held while waiting on an
+  external provider.
+- SUCCEEDED means the adapter returned a valid matching result. FAILED_SAFE means the adapter
+  guarantees that no effect began. UNKNOWN means the effect may have happened and includes timeouts,
+  ambiguous adapter failures, unexpected exceptions, and contract-invalid results.
+- A second call with the same completed effect key returns the durable first result without calling
+  the adapter. FAILED_SAFE and UNKNOWN are also not retried automatically.
+- If the process crashes after the EXECUTING claim, a restart finds the unresolved claim and refuses
+  to repeat the effect. A production reconciliation worker would query the provider and resolve it;
+  the take-home safely leaves it visible for manual handling.
+- MockMailboxExecutor provides deterministic success, definite failure, unknown outcome, unavailable,
+  and unexpected-exception modes, allowing the safety behavior to be demonstrated without Gmail.
+- Every terminal transition appends execution.succeeded, execution.failed_safe, or execution.unknown
+  atomically with its execution projection update.
+
+The execution tests demonstrate successful deduplication, approved external execution, missing
+approval rejection, fresh-policy rejection, definite failure, ambiguous outcome, malformed adapter
+response, crash recovery, restart durability, and zero duplicate adapter calls.
+
 
 17. EVENT STORE AND SQLITE DESIGN
 =================================
@@ -1053,8 +1087,9 @@ What is implemented in coding Step 15:
   event type and version, JSON payload, and timezone-aware UTC occurrence time. The event version
   lets a future reader deliberately upcast an older payload instead of silently guessing its shape.
 - SQLiteStore opens or creates a versioned database. PRAGMA user_version is the migration marker.
-  Step 15 introduced schema version 1; Step 16 migrates it to version 2. A database from a newer
-  application version is rejected so older code cannot corrupt it.
+  Step 15 introduced schema version 1, Step 16 added approvals in version 2, and Step 17 adds
+  executions in version 3. A database from a newer application version is rejected so older code
+  cannot corrupt it.
 - audit_events is the append-only source of truth. Its primary key prevents duplicate event IDs,
   its stream-and-sequence uniqueness preserves ordering, and database triggers reject UPDATE and
   DELETE even when a caller bypasses Python and sends SQL directly.
@@ -1068,8 +1103,9 @@ What is implemented in coding Step 15:
   synchronous mode. No LLM or mailbox call occurs inside a database transaction.
 
 The Step 15 schema intentionally began with only audit_events and preference_states. Step 16 adds
-approvals through migration 2. Execution, email, decision, and feedback-deduplication projections
-are still added with the later workflows that own their invariants. This keeps the schema honest.
+approvals through migration 2, and Step 17 adds executions through migration 3. Email, decision,
+and feedback-deduplication projections are still added with later workflows that own their
+invariants. This keeps the schema honest.
 
 Core event types:
 

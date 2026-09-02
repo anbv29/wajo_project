@@ -590,6 +590,8 @@ class ApprovalRecord(StrictModel):
             raise ValueError("approval grant cannot precede creation")
         if self.consumed_at is not None and self.consumed_at < self.created_at:
             raise ValueError("approval consumption cannot precede creation")
+        if self.consumed_at is not None and self.consumed_at >= self.expires_at:
+            raise ValueError("approval cannot be consumed at or after expiry")
 
         if self.status == ApprovalStatus.PENDING:
             if any(
@@ -624,6 +626,9 @@ class ApprovalRecord(StrictModel):
 class ExecutionCommand(StrictModel):
     """A policy-authorized instruction presented to a mailbox executor."""
 
+    execution_id: str = Field(
+        default_factory=lambda: new_id("execution"), min_length=1, max_length=512
+    )
     command_id: str = Field(default_factory=lambda: new_id("command"), min_length=1, max_length=512)
     idempotency_key: str = Field(min_length=1, max_length=512)
     email_id: str = Field(min_length=1, max_length=512)
@@ -642,6 +647,7 @@ class ExecutionCommand(StrictModel):
 
     @field_validator(
         "command_id",
+        "execution_id",
         "idempotency_key",
         "email_id",
         "proposal_id",
@@ -701,6 +707,13 @@ class ExecutionResult(StrictModel):
         cleaned = value.strip()
         return cleaned or None
 
+    @field_validator("created_at")
+    @classmethod
+    def require_aware_result_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("execution result time must include a timezone")
+        return value.astimezone(UTC)
+
     @model_validator(mode="after")
     def contains_terminal_executor_state(self) -> ExecutionResult:
         terminal_states = {
@@ -711,6 +724,80 @@ class ExecutionResult(StrictModel):
         if self.state not in terminal_states:
             raise ValueError("an execution result must contain a terminal executor state")
         return self
+
+
+class ExecutionRecord(StrictModel):
+    """Durable execution claim used to prevent a side effect from running twice."""
+
+    execution_id: str = Field(min_length=1, max_length=512)
+    command: ExecutionCommand
+    state: Literal[
+        ExecutionState.EXECUTING,
+        ExecutionState.SUCCEEDED,
+        ExecutionState.FAILED_SAFE,
+        ExecutionState.UNKNOWN,
+    ]
+    attempt_count: int = Field(default=1, ge=1)
+    detail: str = Field(min_length=1, max_length=1_000)
+    provider_operation_id: str | None = Field(default=None, max_length=512)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+
+    @field_validator("execution_id", "detail")
+    @classmethod
+    def clean_execution_record_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("execution record text cannot be blank")
+        return cleaned
+
+    @field_validator("provider_operation_id")
+    @classmethod
+    def clean_record_provider_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @field_validator("created_at", "updated_at", "started_at", "completed_at")
+    @classmethod
+    def require_aware_execution_time(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("execution timestamps must include a timezone")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def validate_execution_record(self) -> ExecutionRecord:
+        if self.execution_id != self.command.execution_id:
+            raise ValueError("execution record and command identities differ")
+        if self.started_at < self.created_at or self.updated_at < self.created_at:
+            raise ValueError("execution timestamps precede creation")
+        if self.state == ExecutionState.EXECUTING and self.completed_at is not None:
+            raise ValueError("executing record cannot have a completion time")
+        if self.state != ExecutionState.EXECUTING and self.completed_at is None:
+            raise ValueError("terminal execution record requires a completion time")
+        if self.completed_at is not None and self.completed_at < self.started_at:
+            raise ValueError("execution completion precedes start")
+        return self
+
+    def as_result(self) -> ExecutionResult:
+        """Return a terminal public result for an already completed execution."""
+        if self.state == ExecutionState.EXECUTING:
+            raise ValueError("executing record does not have a terminal result")
+        return ExecutionResult(
+            execution_id=self.execution_id,
+            command_id=self.command.command_id,
+            idempotency_key=self.command.idempotency_key,
+            proposal_id=self.command.proposal_id,
+            state=self.state,
+            detail=self.detail,
+            provider_operation_id=self.provider_operation_id,
+            created_at=self.completed_at or self.updated_at,
+        )
 
 
 class AgentOutcome(StrictModel):

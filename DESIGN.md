@@ -55,9 +55,9 @@ retains final authority.
 
 `SQLiteStore` is the durable implementation of the learner's preference repository and the local
 append-only audit store. Ordered migrations are tracked through `PRAGMA user_version`: version 1
-adds events and preferences, and version 2 adds approvals. A database created by a newer application
-is rejected instead of guessed at. Connections enable foreign keys, WAL journal mode, a five-second
-busy timeout, and short explicit write transactions.
+adds events and preferences, version 2 adds approvals, and version 3 adds executions. A database
+created by a newer application is rejected instead of guessed at. Connections enable foreign keys,
+WAL journal mode, a five-second busy timeout, and short explicit write transactions.
 
 The `audit_events` table assigns an independent monotonically increasing sequence within each
 stream. Database triggers reject updates and deletes, so append-only behavior still holds if code
@@ -79,8 +79,28 @@ The legal state transitions are `PENDING -> GRANTED -> CONSUMED` plus terminal r
 and invalidation paths. SQLite compare-and-set updates make consumption one-time even with stale
 workers. An edit atomically invalidates the old request, increments the proposal version, and creates
 a separately expiring replacement after the revised proposal has received a new `ASK` decision.
-Every transition and its projection update commit in the same transaction. Step 17 will perform the
-fresh policy check and consume the approval at the execution boundary.
+Every transition and its projection update commit in the same transaction. Execution performs a
+fresh policy check and consumes the approval in the same transaction as its durable execution claim.
+
+## Execution safety and idempotency
+
+`ExecutionService` is the only application service that invokes a `MailboxExecutor`. Immediately
+before claiming an effect it revalidates the exact proposal and decision against current risk and
+preference inputs. `ESCALATE` cannot execute, `ASK` requires a matching granted approval, and lower
+tiers cannot smuggle an approval into their command.
+
+The idempotency key is canonical SHA-256 over a versioned document containing mailbox identity,
+provider message identity, proposal version, action type, and the complete action payload. Display
+text, command UUIDs, and autonomy tier are excluded because they do not change the intended effect.
+SQLite migration 3 adds one unique execution projection per effect key.
+
+The service first commits an `EXECUTING` record and `execution.started` event; for `ASK`, that same
+transaction compare-and-sets the approval from `GRANTED` to `CONSUMED`. Only after commit does the
+adapter run. A completed provider response becomes `SUCCEEDED`, a certified pre-effect failure
+becomes `FAILED_SAFE`, and a timeout, invalid response, unexpected exception, or ambiguous provider
+outcome becomes `UNKNOWN`. Neither terminal failures nor unknown outcomes retry automatically.
+If the process crashes after the claim, the durable `EXECUTING` row blocks a duplicate and requires
+reconciliation. The included scripted mock adapter makes each outcome reproducible offline.
 
 ## Scope
 

@@ -16,6 +16,10 @@ class ExecutorUnavailableError(ExecutorError):
     """The executor was unavailable before an effect could safely begin."""
 
 
+class ExecutorOutcomeUnknownError(ExecutorError):
+    """The adapter cannot prove whether the requested side effect happened."""
+
+
 class ExecutorContractError(ExecutorError):
     """A command or result contradicted the executor boundary."""
 
@@ -40,6 +44,8 @@ def validate_execution_command(command: ExecutionCommand) -> None:
 
 def validate_execution_result(command: ExecutionCommand, result: ExecutionResult) -> None:
     """Ensure an adapter result belongs to the exact command that was sent."""
+    if result.execution_id != command.execution_id:
+        raise ExecutorContractError("executor result belongs to a different execution")
     if result.command_id != command.command_id:
         raise ExecutorContractError("executor result belongs to a different command")
     if result.idempotency_key != command.idempotency_key:
