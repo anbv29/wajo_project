@@ -1088,9 +1088,9 @@ What is implemented in coding Step 15:
   lets a future reader deliberately upcast an older payload instead of silently guessing its shape.
 - SQLiteStore opens or creates a versioned database. PRAGMA user_version is the migration marker.
   Step 15 introduced schema version 1, Step 16 added approvals in version 2, Step 17 added
-  executions in version 3, Step 18 added durable inbound run claims in version 4, and Step 19 adds
-  exactly-once feedback receipts in version 5. A database from a newer application version is
-  rejected so older code cannot corrupt it.
+  executions in version 3, Step 18 added durable inbound run claims in version 4, Step 19 added
+  exactly-once feedback receipts in version 5, and Step 20 adds typed agent-outcome read models in
+  version 6. A database from a newer application version is rejected so older code cannot corrupt it.
 - audit_events is the append-only source of truth. Its primary key prevents duplicate event IDs,
   its stream-and-sequence uniqueness preserves ordering, and database triggers reject UPDATE and
   DELETE even when a caller bypasses Python and sends SQL directly.
@@ -1105,9 +1105,9 @@ What is implemented in coding Step 15:
 
 The Step 15 schema intentionally began with only audit_events and preference_states. Step 16 added
 approvals through migration 2, Step 17 added executions through migration 3, Step 18 added
-agent_runs through migration 4, and Step 19 adds feedback_records through migration 5. Separate
-email and decision projections can still be added with later workflows that own their invariants.
-This keeps the schema honest.
+agent_runs through migration 4, Step 19 added feedback_records through migration 5, and Step 20
+adds agent_outcomes through migration 6. The outcome table is a current read model; immutable
+history remains in audit_events. This keeps the schema honest.
 
 Core event types:
 
@@ -1357,7 +1357,7 @@ What is implemented in coding Step 19:
 20. COMMAND-LINE INTERFACE AND DEMONSTRATION EXPERIENCE
 =======================================================
 
-The CLI is the primary product surface for the take-home. Planned commands include:
+The CLI is the primary product surface for the take-home. Implemented commands include:
 
     wajo init-db
         Initialize or migrate the local database.
@@ -1372,10 +1372,11 @@ The CLI is the primary product surface for the take-home. Planned commands inclu
         Show proposal, tier, risks, policy floor, preference evidence, and reasons.
 
     wajo approve <approval-id>
-        Display the exact payload again and grant single-use approval.
+        Reload the exact typed proposal, grant it, execute it once, and record approval feedback.
 
     wajo edit <approval-id>
-        Create a new proposal version from an edited payload and re-run policy.
+        Validate an edited payload, create a new proposal version, re-run policy, invalidate
+        the old approval, and require review of a new approval.
 
     wajo reject <approval-id>
         Reject and record feedback.
@@ -1392,10 +1393,58 @@ The CLI is the primary product surface for the take-home. Planned commands inclu
     wajo demo
         Run the curated five-scenario interview demonstration.
 
-    wajo eval all
-        Run the complete local evaluation suite and produce reports.
+The evaluation command is intentionally reserved for the later evaluation-harness step; Step 20
+does not pretend that the current behavioral scripts are the final measured report.
 
-Rich output uses colors and tables for readability, but every result is also written as machine-readable JSON so the evaluation is not dependent on terminal formatting.
+What is implemented in coding Step 20:
+
+- src/wajo_agent/cli.py defines the installed wajo command using Typer. Shared options select the
+  database, mailbox identity, feedback actor, optional OpenAI model, and --json output mode.
+- init-db creates or migrates SQLite and reports the exact schema version. ingest validates a JSON
+  fixture as EmailEnvelope and sends it through the complete seven-stage ProactiveEmailAgent. The
+  hidden process alias preserves the command already shown in the README.
+- inbox and decision are read-only inspection tools. inbox reads recent outcomes and resolves the
+  current approval status from the authoritative approval table. decision shows the proposal,
+  independent capability/content/preference floors, risk evidence, Beta evidence, reasons, route,
+  and linked approval or execution identity.
+- approve looks up an outcome by durable approval ID. It does not trust the terminal to resubmit a
+  proposal. Human mode displays the action, complete payload, proposal version, and SHA-256 binding,
+  then asks for confirmation. JSON mode requires an explicit --yes flag. It grants the exact
+  payload-bound approval, executes through ExecutionService, consumes authority atomically with the
+  execution claim, and records evidence-backed APPROVED feedback.
+- reject moves a pending approval to its terminal rejected state and records weighted negative
+  evidence. A second transition fails instead of silently succeeding.
+- edit accepts a complete typed payload, retains proposal identity, increments the version exactly
+  once, and re-runs the shared planner-output contract, contextual recommendation, deterministic
+  policy, and ApprovalService replacement workflow. The old authority is invalidated and the new
+  payload receives a different pending approval ID. EDITED feedback is attached to the original.
+- The shared planner contract now rejects any message-scoped proposal whose message_id differs
+  from the actually observed provider message. This protects both model output and manual edits
+  from redirecting archive, trash, label, or read-state actions to another email.
+- feedback accepts exactly one of --correct or --undo and uses the Step 19 evidence service.
+  preferences exposes alpha, beta, observations, cooldown, and recent evidence. events reads one
+  ordered stream or the newest cross-stream records.
+- SQLite migration 6 adds agent_outcomes, a restart-safe current read model containing the complete
+  strict AgentOutcome. Completing agent_runs, appending run.completed, and inserting the outcome
+  happen in one transaction. This table helps the UI find facts; approvals, executions, policy,
+  feedback receipts, and append-only events remain the sources of authority and evidence.
+- Stored outcomes exclude computed display fields such as injection_detected. Those values are
+  recomputed from authoritative signals during strict reload, preventing derived data from becoming
+  a second source of truth.
+- Five safe JSON fixtures cover newsletter, spam, prompt injection, ordinary request, and financial
+  content. They contain no credentials and require no external mailbox.
+- demo --reset removes only the explicitly configured SQLite database and its WAL sidecars, then
+  runs a reproducible five-scenario interview story. It shows cold-start ASK, learned NOTIFY,
+  learned SILENT, prompt-injection ESCALATE, and UNKNOWN provider outcome handling.
+- Calibration in the demo is genuine: each observation comes from a real granted approval or a
+  successful execution followed by explicit CORRECT feedback. The demo never edits Beta counters
+  directly. Its UNKNOWN effect is not retried.
+- Rich tables make the human mode easy to present. Putting --json before any command provides
+  deterministic machine-readable output for scripts and later evaluation.
+- The Step 20 check script drives the Typer application across process-style database reopenings.
+  It verifies migration, ingestion, durable lookup, approval execution, duplicate rejection,
+  editing, replacement authority, rejection, feedback, preferences, events, all five demo routes,
+  and restart durability.
 
 
 21. OPTIONAL GMAIL INTEGRATION

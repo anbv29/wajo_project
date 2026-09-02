@@ -120,6 +120,19 @@ def main() -> None:
     else:
         raise RuntimeError("planner contract accepted a disallowed action")
 
+    wrong_message = PlannerOutput(
+        action_type=ActionType.ARCHIVE,
+        intent=Intent.NEWSLETTER,
+        summary="Archive a different mailbox message",
+        payload=MessagePayload(kind=ActionType.ARCHIVE, message_id="provider-message-other"),
+    )
+    try:
+        validate_planner_output(request, wrong_message)
+    except PlannerContractError:
+        checks += 1
+    else:
+        raise RuntimeError("planner contract accepted an action for another message")
+
     executor = FakeExecutor()
     _require(isinstance(executor, MailboxExecutor), "executor does not satisfy the protocol")
     checks += 1

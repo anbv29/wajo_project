@@ -1,0 +1,9 @@
+{
+  "provider_message_id": "fixture-request-001",
+  "sender": "teammate@example.com",
+  "recipients": ["user@example.com"],
+  "subject": "Please review the launch note",
+  "body_text": "Could you review the launch note and confirm the final wording?",
+  "sender_bucket": "known_person",
+  "source": "fixture"
+}

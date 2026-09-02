@@ -337,11 +337,8 @@ class ProactiveEmailAgent:
         )
 
     def _complete_run(self, lifecycle: AgentLifecycle, outcome: AgentOutcome) -> None:
-        self._store.complete_agent_run(
-            run_id=lifecycle.run_id,
-            route=outcome.route,
-            decision_tier=outcome.decision.tier,
-            execution_state=(outcome.execution.state if outcome.execution is not None else None),
+        self._store.complete_agent_run_with_outcome(
+            outcome,
             occurred_at=lifecycle.entries[-1].recorded_at,
         )
 

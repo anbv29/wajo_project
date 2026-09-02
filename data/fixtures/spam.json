@@ -1,0 +1,9 @@
+{
+  "provider_message_id": "fixture-spam-001",
+  "sender": "prizes@example.net",
+  "recipients": ["user@example.com"],
+  "subject": "You are a winner",
+  "body_text": "Claim your prize now.",
+  "sender_bucket": "unknown",
+  "source": "fixture"
+}

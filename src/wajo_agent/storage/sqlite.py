@@ -12,6 +12,7 @@ from pathlib import Path
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from wajo_agent.domain import (
+    AgentOutcome,
     ApprovalRecord,
     ApprovalStatus,
     AuditEvent,
@@ -27,7 +28,7 @@ from wajo_agent.domain import (
 )
 from wajo_agent.domain.models import new_id, utc_now
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 FEEDBACK_LIST_ADAPTER = TypeAdapter(list[str])
 
 MIGRATION_V1 = """
@@ -205,12 +206,35 @@ PRAGMA user_version = 5;
 COMMIT;
 """
 
+MIGRATION_V6 = """
+BEGIN IMMEDIATE;
+
+CREATE TABLE agent_outcomes (
+    run_id TEXT PRIMARY KEY REFERENCES agent_runs(run_id),
+    email_id TEXT NOT NULL,
+    provider_message_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL UNIQUE,
+    approval_id TEXT UNIQUE,
+    outcome_json TEXT NOT NULL CHECK (json_valid(outcome_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX idx_agent_outcomes_provider_message
+    ON agent_outcomes (provider_message_id);
+
+PRAGMA user_version = 6;
+COMMIT;
+"""
+
 MIGRATIONS = {
     1: MIGRATION_V1,
     2: MIGRATION_V2,
     3: MIGRATION_V3,
     4: MIGRATION_V4,
     5: MIGRATION_V5,
+    6: MIGRATION_V6,
 }
 
 
@@ -408,6 +432,22 @@ class SQLiteStore:
         ).fetchall()
         return tuple(_event_from_row(row) for row in rows)
 
+    def read_recent_events(self, *, limit: int = 100) -> tuple[AuditEvent, ...]:
+        """Load the newest audit events across streams, newest first."""
+        if not 1 <= limit <= 1_000:
+            raise ValueError("event limit must be between 1 and 1000")
+        rows = self._connection.execute(
+            """
+            SELECT event_id, stream_id, sequence, event_type, event_version,
+                   payload_json, occurred_at
+            FROM audit_events
+            ORDER BY rowid DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return tuple(_event_from_row(row) for row in rows)
+
     def get_preference(self, context_key: str) -> PreferenceState:
         """Satisfy PreferenceRepository with a cold prior when no row exists."""
         cleaned_key = context_key.strip()
@@ -428,6 +468,22 @@ class SQLiteStore:
         """Persist one current preference projection in a short transaction."""
         with self._write_transaction():
             self._upsert_preference(state)
+
+    def list_preferences(self, *, limit: int = 100) -> tuple[PreferenceState, ...]:
+        """List learned contexts with the most observed evidence first."""
+        if not 1 <= limit <= 1_000:
+            raise ValueError("preference limit must be between 1 and 1000")
+        rows = self._connection.execute(
+            """
+            SELECT context_key, alpha, beta, observations,
+                   recent_feedback_json, cooldown_remaining
+            FROM preference_states
+            ORDER BY observations DESC, context_key ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return tuple(_preference_from_row(row) for row in rows)
 
     def save_preference_and_append_event(
         self,
@@ -883,39 +939,192 @@ class SQLiteStore:
     ) -> None:
         """Complete a claimed run and append its final event atomically."""
         with self._write_transaction():
-            cursor = self._connection.execute(
+            self._complete_agent_run(
+                run_id=run_id,
+                route=route,
+                decision_tier=decision_tier,
+                execution_state=execution_state,
+                occurred_at=occurred_at,
+            )
+
+    def complete_agent_run_with_outcome(
+        self,
+        outcome: AgentOutcome,
+        *,
+        occurred_at: datetime,
+    ) -> None:
+        """Atomically complete a run and save its typed CLI/read-model snapshot."""
+        with self._write_transaction():
+            self._complete_agent_run(
+                run_id=outcome.run_id,
+                route=outcome.route,
+                decision_tier=outcome.decision.tier,
+                execution_state=(
+                    outcome.execution.state if outcome.execution is not None else None
+                ),
+                occurred_at=occurred_at,
+            )
+            self._insert_agent_outcome(outcome, occurred_at=occurred_at)
+
+    def _complete_agent_run(
+        self,
+        *,
+        run_id: str,
+        route: OutcomeRoute,
+        decision_tier: AutonomyTier,
+        execution_state: ExecutionState | None,
+        occurred_at: datetime,
+    ) -> None:
+        cleaned_run_id = run_id.strip()
+        cursor = self._connection.execute(
+            """
+            UPDATE agent_runs
+            SET status = 'completed', outcome_route = ?, decision_tier = ?,
+                execution_state = ?, updated_at = ?
+            WHERE run_id = ? AND status = 'processing'
+            """,
+            (
+                route.value,
+                decision_tier.value,
+                execution_state.value if execution_state is not None else None,
+                occurred_at.isoformat(),
+                cleaned_run_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise AgentRunStateConflictError(
+                f"agent run is missing or already complete: {cleaned_run_id}"
+            )
+        self._insert_event(
+            stream_id=f"run:{cleaned_run_id}",
+            event_type="run.completed",
+            payload={
+                "route": route.value,
+                "decision_tier": decision_tier.value,
+                "execution_state": (execution_state.value if execution_state is not None else None),
+            },
+            event_version=1,
+            event_id=None,
+            occurred_at=occurred_at,
+        )
+
+    def _insert_agent_outcome(
+        self,
+        outcome: AgentOutcome,
+        *,
+        occurred_at: datetime,
+    ) -> None:
+        outcome_json = _canonical_json(
+            outcome.model_dump(mode="json", exclude_computed_fields=True)
+        )
+        approval_id = outcome.approval.approval_id if outcome.approval is not None else None
+        try:
+            self._connection.execute(
                 """
-                UPDATE agent_runs
-                SET status = 'completed', outcome_route = ?, decision_tier = ?,
-                    execution_state = ?, updated_at = ?
-                WHERE run_id = ? AND status = 'processing'
+                INSERT INTO agent_outcomes (
+                    run_id, email_id, provider_message_id, decision_id, approval_id,
+                    outcome_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    route.value,
-                    decision_tier.value,
-                    execution_state.value if execution_state is not None else None,
+                    outcome.run_id,
+                    outcome.email.email_id,
+                    outcome.email.provider_message_id,
+                    outcome.decision.decision_id,
+                    approval_id,
+                    outcome_json,
                     occurred_at.isoformat(),
-                    run_id.strip(),
+                    occurred_at.isoformat(),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise AgentRunStateConflictError(
+                "run outcome identity already exists or is not attached to its run"
+            ) from exc
+
+    def replace_agent_outcome(
+        self,
+        outcome: AgentOutcome,
+        *,
+        expected_decision_id: str,
+        occurred_at: datetime,
+    ) -> None:
+        """Replace the current read model after an approved workflow edit."""
+        if outcome.approval is None or outcome.proposal is None:
+            raise ValueError("replacement outcome must contain its proposal and new approval")
+        outcome_json = _canonical_json(
+            outcome.model_dump(mode="json", exclude_computed_fields=True)
+        )
+        with self._write_transaction():
+            cursor = self._connection.execute(
+                """
+                UPDATE agent_outcomes
+                SET email_id = ?, provider_message_id = ?, decision_id = ?,
+                    approval_id = ?, outcome_json = ?, updated_at = ?
+                WHERE run_id = ? AND decision_id = ?
+                """,
+                (
+                    outcome.email.email_id,
+                    outcome.email.provider_message_id,
+                    outcome.decision.decision_id,
+                    outcome.approval.approval_id,
+                    outcome_json,
+                    occurred_at.isoformat(),
+                    outcome.run_id,
+                    expected_decision_id.strip(),
                 ),
             )
             if cursor.rowcount != 1:
-                raise AgentRunStateConflictError(
-                    f"agent run is missing or already complete: {run_id.strip()}"
-                )
+                raise AgentRunStateConflictError("current run outcome changed before replacement")
             self._insert_event(
-                stream_id=f"run:{run_id.strip()}",
-                event_type="run.completed",
+                stream_id=f"run:{outcome.run_id}",
+                event_type="proposal.edited",
                 payload={
-                    "route": route.value,
-                    "decision_tier": decision_tier.value,
-                    "execution_state": (
-                        execution_state.value if execution_state is not None else None
-                    ),
+                    "decision_id": outcome.decision.decision_id,
+                    "proposal_id": outcome.proposal.proposal_id,
+                    "proposal_version": outcome.proposal.version,
+                    "approval_id": outcome.approval.approval_id,
                 },
                 event_version=1,
                 event_id=None,
                 occurred_at=occurred_at,
             )
+
+    def get_agent_outcome(self, run_id: str) -> AgentOutcome | None:
+        """Load one completed run snapshot by run identity."""
+        return self._get_agent_outcome("run_id", run_id)
+
+    def get_agent_outcome_by_decision(self, decision_id: str) -> AgentOutcome | None:
+        """Load the current run snapshot carrying a decision."""
+        return self._get_agent_outcome("decision_id", decision_id)
+
+    def get_agent_outcome_by_approval(self, approval_id: str) -> AgentOutcome | None:
+        """Load the current run snapshot carrying an approval request."""
+        return self._get_agent_outcome("approval_id", approval_id)
+
+    def _get_agent_outcome(self, column: str, identity: str) -> AgentOutcome | None:
+        if column not in {"run_id", "decision_id", "approval_id"}:
+            raise ValueError("unsupported outcome lookup")
+        row = self._connection.execute(
+            f"SELECT outcome_json FROM agent_outcomes WHERE {column} = ?",
+            (identity.strip(),),
+        ).fetchone()
+        return None if row is None else _agent_outcome_from_row(row)
+
+    def list_agent_outcomes(self, *, limit: int = 100) -> tuple[AgentOutcome, ...]:
+        """List recent completed run snapshots for the CLI inbox."""
+        if not 1 <= limit <= 1_000:
+            raise ValueError("outcome limit must be between 1 and 1000")
+        rows = self._connection.execute(
+            """
+            SELECT outcome_json
+            FROM agent_outcomes
+            ORDER BY updated_at DESC, run_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return tuple(_agent_outcome_from_row(row) for row in rows)
 
     def commit_feedback(
         self,
@@ -1161,6 +1370,13 @@ def _feedback_from_row(row: sqlite3.Row) -> FeedbackRecord:
         return FeedbackRecord.model_validate_json(str(row["record_json"]))
     except ValidationError as exc:
         raise StorageError("stored feedback is malformed") from exc
+
+
+def _agent_outcome_from_row(row: sqlite3.Row) -> AgentOutcome:
+    try:
+        return AgentOutcome.model_validate_json(str(row["outcome_json"]))
+    except ValidationError as exc:
+        raise StorageError("stored agent outcome is malformed") from exc
 
 
 def _same_feedback_semantics(

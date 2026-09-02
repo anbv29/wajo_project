@@ -7,6 +7,8 @@ from typing import Protocol, runtime_checkable
 from wajo_agent.domain import (
     ActionProposal,
     EmailEnvelope,
+    LabelPayload,
+    MessagePayload,
     PlannerOutput,
     PlannerRequest,
 )
@@ -54,6 +56,10 @@ def validate_planner_output(request: PlannerRequest, output: PlannerOutput) -> N
         raise PlannerContractError(
             f"planner proposed disallowed action: {output.action_type.value}"
         )
+    if isinstance(output.payload, (MessagePayload, LabelPayload)) and (
+        output.payload.message_id != request.email.provider_message_id
+    ):
+        raise PlannerContractError("message action targets a different provider message")
 
 
 def bind_planner_output(request: PlannerRequest, output: PlannerOutput) -> ActionProposal:

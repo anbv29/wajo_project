@@ -67,9 +67,10 @@ one transaction. A duplicate returns the original receipt without adding another
 `SQLiteStore` is the durable implementation of the learner's preference repository and the local
 append-only audit store. Ordered migrations are tracked through `PRAGMA user_version`: version 1
 adds events and preferences, version 2 adds approvals, version 3 adds executions, and version 4 adds
-durable agent-run claims. Version 5 adds exactly-once feedback receipts. A database created by a
-newer application is rejected instead of guessed at. Connections enable foreign keys, WAL journal
-mode, a five-second busy timeout, and short explicit write transactions.
+durable agent-run claims. Version 5 adds exactly-once feedback receipts, and version 6 adds typed
+agent-outcome read models for restart-safe CLI inspection. A database created by a newer application
+is rejected instead of guessed at. Connections enable foreign keys, WAL journal mode, a five-second
+busy timeout, and short explicit write transactions.
 
 The `audit_events` table assigns an independent monotonically increasing sequence within each
 stream. Database triggers reject updates and deletes, so append-only behavior still holds if code
@@ -78,6 +79,11 @@ bypasses the repository. Payloads use deterministic, standards-compliant JSON an
 current-state projection. A combined operation updates that projection and appends its explaining
 event in one transaction; either both commit or both roll back. Execution projections are added with
 their workflow rather than being prematurely represented by unused tables.
+
+`agent_outcomes` is a read model rather than a new authority source. Run completion and its strict
+typed outcome snapshot commit atomically. The CLI reloads that snapshot to recover the exact email,
+proposal, risk, decision, and approval IDs, then rechecks live approval and execution tables before
+acting. Derived Pydantic display fields are excluded from stored input and recomputed during reload.
 
 ## Approval authority
 
@@ -128,6 +134,23 @@ was `SILENT`. Planner failure also produces a complete auditable escalation rath
 to act. Each run has its own ordered event stream containing observation, normalization, risk,
 proposal, decision, and completion evidence; approval and execution details remain in their linked
 streams.
+
+## Command-line demo
+
+The Typer CLI exposes database initialization, fixture ingestion, inbox and decision inspection,
+approval, rejection, proposal editing, explicit execution feedback, preferences, audit events, and
+a five-scenario offline demo. Human output uses Rich tables; placing `--json` before the command
+returns deterministic machine-readable JSON.
+
+Approval commands never accept a replacement proposal from display output. They load the exact
+typed outcome by durable approval or decision ID. Edits create a new proposal version and approval,
+re-run planner-output binding and deterministic policy, invalidate the old approval, and record
+explicit edit evidence. The shared planner contract also requires every message-scoped action to
+target the provider message that was actually observed.
+
+The demo reaches `NOTIFY` and `SILENT` through real evidence-backed feedback operations rather than
+seeding counters. It also demonstrates cold-start `ASK`, prompt-injection `ESCALATE`, and an
+ambiguous provider result becoming `UNKNOWN` without retry.
 
 ## Scope
 

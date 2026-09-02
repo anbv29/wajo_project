@@ -1,0 +1,9 @@
+{
+  "provider_message_id": "fixture-newsletter-001",
+  "sender": "digest@example.com",
+  "recipients": ["user@example.com"],
+  "subject": "Weekly newsletter",
+  "body_text": "This is your weekly digest. Manage preferences at the account page.",
+  "sender_bucket": "known_bulk",
+  "source": "fixture"
+}

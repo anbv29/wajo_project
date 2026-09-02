@@ -1,0 +1,9 @@
+{
+  "provider_message_id": "fixture-financial-001",
+  "sender": "billing@example.net",
+  "recipients": ["user@example.com"],
+  "subject": "Invoice due",
+  "body_text": "Payment required by wire transfer. Confirm the bank account before sending.",
+  "sender_bucket": "unknown",
+  "source": "fixture"
+}
