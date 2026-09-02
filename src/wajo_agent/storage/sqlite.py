@@ -11,10 +11,16 @@ from pathlib import Path
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
-from wajo_agent.domain import AuditEvent, FeedbackType, PreferenceState
+from wajo_agent.domain import (
+    ApprovalRecord,
+    ApprovalStatus,
+    AuditEvent,
+    FeedbackType,
+    PreferenceState,
+)
 from wajo_agent.domain.models import new_id, utc_now
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 FEEDBACK_LIST_ADAPTER = TypeAdapter(list[str])
 
 MIGRATION_V1 = """
@@ -60,6 +66,50 @@ PRAGMA user_version = 1;
 COMMIT;
 """
 
+MIGRATION_V2 = """
+BEGIN IMMEDIATE;
+
+CREATE TABLE approvals (
+    approval_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL,
+    proposal_version INTEGER NOT NULL CHECK (proposal_version >= 1),
+    payload_hash TEXT NOT NULL CHECK (
+        length(payload_hash) = 64 AND payload_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'granted', 'rejected', 'consumed', 'expired', 'invalidated')
+    ),
+    actor TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    granted_at TEXT,
+    consumed_at TEXT,
+    superseded_by_approval_id TEXT REFERENCES approvals(approval_id),
+    CHECK (expires_at > created_at),
+    CHECK (updated_at >= created_at),
+    CHECK (status = 'consumed' OR consumed_at IS NULL),
+    CHECK (status != 'consumed' OR consumed_at IS NOT NULL),
+    CHECK (status NOT IN ('granted', 'consumed') OR (actor IS NOT NULL AND granted_at IS NOT NULL)),
+    CHECK (status NOT IN ('rejected', 'invalidated') OR actor IS NOT NULL),
+    CHECK (superseded_by_approval_id IS NULL OR status = 'invalidated'),
+    CHECK (superseded_by_approval_id IS NULL OR superseded_by_approval_id != approval_id)
+);
+
+CREATE INDEX idx_approvals_proposal
+    ON approvals (proposal_id, proposal_version);
+CREATE INDEX idx_approvals_status_expiry
+    ON approvals (status, expires_at);
+
+PRAGMA user_version = 2;
+COMMIT;
+"""
+
+MIGRATIONS = {
+    1: MIGRATION_V1,
+    2: MIGRATION_V2,
+}
+
 
 class StorageError(RuntimeError):
     """Base class for safe storage failures."""
@@ -71,6 +121,18 @@ class SchemaVersionError(StorageError):
 
 class DuplicateEventError(StorageError):
     """An event identifier has already been committed."""
+
+
+class ApprovalNotFoundError(StorageError):
+    """The requested approval does not exist."""
+
+
+class ApprovalStateConflictError(StorageError):
+    """An approval changed between observation and attempted transition."""
+
+
+class DuplicateApprovalError(StorageError):
+    """An approval identifier has already been committed."""
 
 
 class SQLiteStore:
@@ -106,15 +168,18 @@ class SQLiteStore:
             raise SchemaVersionError(
                 f"database schema {version} is newer than supported version {SCHEMA_VERSION}"
             )
-        if version == 0:
+        for target_version in range(version + 1, SCHEMA_VERSION + 1):
+            migration = MIGRATIONS.get(target_version)
+            if migration is None:
+                raise SchemaVersionError(f"no migration path from schema {target_version - 1}")
             try:
-                self._connection.executescript(MIGRATION_V1)
+                self._connection.executescript(migration)
             except sqlite3.DatabaseError as exc:
                 if self._connection.in_transaction:
                     self._connection.execute("ROLLBACK")
-                raise StorageError("failed to initialize SQLite schema") from exc
-        elif version != SCHEMA_VERSION:
-            raise SchemaVersionError(f"no migration path from schema {version}")
+                raise StorageError(
+                    f"failed to migrate SQLite schema to version {target_version}"
+                ) from exc
 
     @property
     def schema_version(self) -> int:
@@ -294,6 +359,167 @@ class SQLiteStore:
             ),
         )
 
+    def create_approval(
+        self,
+        record: ApprovalRecord,
+        *,
+        event_payload: dict[str, JsonValue],
+    ) -> ApprovalRecord:
+        """Atomically persist a new approval request and its audit event."""
+        if record.status != ApprovalStatus.PENDING:
+            raise ValueError("new approval must start pending")
+        with self._write_transaction():
+            self._insert_approval(record)
+            self._insert_event(
+                stream_id=_approval_stream_id(record.approval_id),
+                event_type="approval.requested",
+                payload=event_payload,
+                event_version=1,
+                event_id=None,
+                occurred_at=record.created_at,
+            )
+        return record
+
+    def get_approval(self, approval_id: str) -> ApprovalRecord:
+        """Load one approval or raise a typed not-found error."""
+        row = self._connection.execute(
+            """
+            SELECT approval_id, proposal_id, proposal_version, payload_hash, status,
+                   actor, created_at, expires_at, updated_at, granted_at, consumed_at,
+                   superseded_by_approval_id
+            FROM approvals
+            WHERE approval_id = ?
+            """,
+            (approval_id.strip(),),
+        ).fetchone()
+        if row is None:
+            raise ApprovalNotFoundError(f"approval not found: {approval_id.strip()}")
+        return _approval_from_row(row)
+
+    def transition_approval(
+        self,
+        record: ApprovalRecord,
+        *,
+        expected_statuses: tuple[ApprovalStatus, ...],
+        event_type: str,
+        event_payload: dict[str, JsonValue],
+    ) -> ApprovalRecord:
+        """Compare-and-set one approval state and append its event in one transaction."""
+        with self._write_transaction():
+            self._update_approval(record, expected_statuses=expected_statuses)
+            self._insert_event(
+                stream_id=_approval_stream_id(record.approval_id),
+                event_type=event_type,
+                payload=event_payload,
+                event_version=1,
+                event_id=None,
+                occurred_at=record.updated_at,
+            )
+        return record
+
+    def replace_approval_for_edit(
+        self,
+        invalidated: ApprovalRecord,
+        replacement: ApprovalRecord,
+        *,
+        expected_statuses: tuple[ApprovalStatus, ...],
+        invalidated_event_payload: dict[str, JsonValue],
+        replacement_event_payload: dict[str, JsonValue],
+    ) -> tuple[ApprovalRecord, ApprovalRecord]:
+        """Invalidate an old approval and create its edited replacement atomically."""
+        if invalidated.status != ApprovalStatus.INVALIDATED:
+            raise ValueError("edited approval must invalidate the previous request")
+        if invalidated.superseded_by_approval_id != replacement.approval_id:
+            raise ValueError("old approval must reference its exact replacement")
+        if replacement.status != ApprovalStatus.PENDING:
+            raise ValueError("replacement approval must start pending")
+
+        with self._write_transaction():
+            self._insert_approval(replacement)
+            self._update_approval(invalidated, expected_statuses=expected_statuses)
+            self._insert_event(
+                stream_id=_approval_stream_id(invalidated.approval_id),
+                event_type="approval.invalidated",
+                payload=invalidated_event_payload,
+                event_version=1,
+                event_id=None,
+                occurred_at=invalidated.updated_at,
+            )
+            self._insert_event(
+                stream_id=_approval_stream_id(replacement.approval_id),
+                event_type="approval.requested",
+                payload=replacement_event_payload,
+                event_version=1,
+                event_id=None,
+                occurred_at=replacement.created_at,
+            )
+        return invalidated, replacement
+
+    def _insert_approval(self, record: ApprovalRecord) -> None:
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO approvals (
+                    approval_id, proposal_id, proposal_version, payload_hash, status,
+                    actor, created_at, expires_at, updated_at, granted_at, consumed_at,
+                    superseded_by_approval_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _approval_values(record),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "approval_id" in str(exc).casefold():
+                raise DuplicateApprovalError(
+                    f"approval already exists: {record.approval_id}"
+                ) from exc
+            raise StorageError("approval violated a database invariant") from exc
+
+    def _update_approval(
+        self,
+        record: ApprovalRecord,
+        *,
+        expected_statuses: tuple[ApprovalStatus, ...],
+    ) -> None:
+        if not expected_statuses:
+            raise ValueError("approval transition requires an expected source status")
+        placeholders = ", ".join("?" for _ in expected_statuses)
+        cursor = self._connection.execute(
+            f"""
+            UPDATE approvals
+            SET status = ?, actor = ?, updated_at = ?, granted_at = ?, consumed_at = ?,
+                superseded_by_approval_id = ?
+            WHERE approval_id = ?
+              AND proposal_id = ?
+              AND proposal_version = ?
+              AND payload_hash = ?
+              AND status IN ({placeholders})
+            """,
+            (
+                record.status.value,
+                record.actor,
+                record.updated_at.isoformat(),
+                _optional_time(record.granted_at),
+                _optional_time(record.consumed_at),
+                record.superseded_by_approval_id,
+                record.approval_id,
+                record.proposal_id,
+                record.proposal_version,
+                record.payload_hash,
+                *(status.value for status in expected_statuses),
+            ),
+        )
+        if cursor.rowcount == 1:
+            return
+        exists = self._connection.execute(
+            "SELECT 1 FROM approvals WHERE approval_id = ?",
+            (record.approval_id,),
+        ).fetchone()
+        if exists is None:
+            raise ApprovalNotFoundError(f"approval not found: {record.approval_id}")
+        raise ApprovalStateConflictError(
+            f"approval is no longer in an expected state: {record.approval_id}"
+        )
+
     def close(self) -> None:
         self._connection.close()
 
@@ -350,3 +576,50 @@ def _preference_from_row(row: sqlite3.Row) -> PreferenceState:
         )
     except (ValidationError, ValueError) as exc:
         raise StorageError("stored preference feedback is malformed") from exc
+
+
+def _approval_values(record: ApprovalRecord) -> tuple[object, ...]:
+    return (
+        record.approval_id,
+        record.proposal_id,
+        record.proposal_version,
+        record.payload_hash,
+        record.status.value,
+        record.actor,
+        record.created_at.isoformat(),
+        record.expires_at.isoformat(),
+        record.updated_at.isoformat(),
+        _optional_time(record.granted_at),
+        _optional_time(record.consumed_at),
+        record.superseded_by_approval_id,
+    )
+
+
+def _approval_from_row(row: sqlite3.Row) -> ApprovalRecord:
+    try:
+        return ApprovalRecord.model_validate(
+            {
+                "approval_id": str(row["approval_id"]),
+                "proposal_id": str(row["proposal_id"]),
+                "proposal_version": int(row["proposal_version"]),
+                "payload_hash": str(row["payload_hash"]),
+                "status": str(row["status"]),
+                "actor": row["actor"],
+                "created_at": str(row["created_at"]),
+                "expires_at": str(row["expires_at"]),
+                "updated_at": str(row["updated_at"]),
+                "granted_at": row["granted_at"],
+                "consumed_at": row["consumed_at"],
+                "superseded_by_approval_id": row["superseded_by_approval_id"],
+            }
+        )
+    except ValidationError as exc:
+        raise StorageError("stored approval is malformed") from exc
+
+
+def _approval_stream_id(approval_id: str) -> str:
+    return f"approval:{approval_id}"
+
+
+def _optional_time(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()

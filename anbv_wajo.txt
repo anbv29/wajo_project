@@ -917,10 +917,10 @@ Approval is not a boolean attached to an email. It is a single-use authorization
 
 Canonical payload for a reply includes:
 
-- email and thread identifiers
+- internal email identity
+- proposal identity
 - action type
 - exact recipients
-- exact subject
 - exact body
 - proposal version
 
@@ -958,6 +958,33 @@ Reject:
 - Record negative preference evidence and cooldown.
 
 An approval is rejected by the executor when it is expired, used, revoked, bound to another version, or has a different payload hash.
+
+What is implemented in coding Step 16:
+
+- canonical_approval_payload creates deterministic UTF-8 JSON containing a canonicalization schema
+  version, proposal ID and version, email ID, action type, and the complete typed action payload.
+  Display-only summary, reasoning, and timestamps are excluded because they do not change the effect.
+- approval_payload_hash computes the lowercase SHA-256 digest. Constant-time comparison prevents a
+  changed recipient, body, action, email, proposal identity, or proposal version from reusing consent.
+- ApprovalService accepts only a self-consistent ASK decision for an enabled capability that is not
+  forced to ESCALATE. It rejects mismatched proposal identities and contradictory recorded floors.
+- Every request receives a bounded expiry time: fifteen minutes by default and never over 24 hours.
+- Legal transitions are PENDING to GRANTED to CONSUMED, or PENDING to REJECTED. Pending or granted
+  records can expire; they can also be invalidated before consumption.
+- Grant records the normalized actor and timestamp. Consumption uses a database compare-and-set from
+  GRANTED to CONSUMED, so a double click, replay, or stale worker cannot authorize a second effect.
+- Editing is deliberately not an in-place mutation. The old pending request becomes INVALIDATED,
+  the proposal version increases by exactly one, policy supplies a new ASK decision, and a new pending
+  request receives a different hash and expiry. Both database changes and both audit events commit in
+  one transaction or roll back together.
+- SQLite schema migration 2 adds the approvals projection, status/expiry indexes, domain constraints,
+  and the self-reference from an invalidated request to its replacement. Existing version-1 databases
+  migrate without losing events or learned preferences.
+- Every transition appends an event such as approval.requested, approval.granted, approval.rejected,
+  approval.expired, approval.invalidated, or approval.consumed in the same local transaction.
+
+Step 16 does not call the mailbox. Step 17 will re-run current policy, validate the approval again,
+atomically consume it at the execution boundary, and then handle the side effect idempotently.
 
 
 16. EXECUTION ENGINE AND IDEMPOTENCY
@@ -1025,8 +1052,9 @@ What is implemented in coding Step 15:
 - AuditEvent is a strict immutable domain model with event ID, stream ID, per-stream sequence,
   event type and version, JSON payload, and timezone-aware UTC occurrence time. The event version
   lets a future reader deliberately upcast an older payload instead of silently guessing its shape.
-- SQLiteStore opens or creates a schema-version-1 database. PRAGMA user_version is the migration
-  marker. A database from a newer application version is rejected so older code cannot corrupt it.
+- SQLiteStore opens or creates a versioned database. PRAGMA user_version is the migration marker.
+  Step 15 introduced schema version 1; Step 16 migrates it to version 2. A database from a newer
+  application version is rejected so older code cannot corrupt it.
 - audit_events is the append-only source of truth. Its primary key prevents duplicate event IDs,
   its stream-and-sequence uniqueness preserves ordering, and database triggers reject UPDATE and
   DELETE even when a caller bypasses Python and sends SQL directly.
@@ -1039,9 +1067,9 @@ What is implemented in coding Step 15:
 - Connections enable foreign keys, a 5,000 millisecond busy timeout, WAL journal mode, and NORMAL
   synchronous mode. No LLM or mailbox call occurs inside a database transaction.
 
-The Step 15 schema intentionally contains only audit_events and preference_states. Approval,
-execution, email, decision, and feedback-deduplication projections are added with the workflows
-that own their invariants in later coding steps. This keeps the current schema honest and tested.
+The Step 15 schema intentionally began with only audit_events and preference_states. Step 16 adds
+approvals through migration 2. Execution, email, decision, and feedback-deduplication projections
+are still added with the later workflows that own their invariants. This keeps the schema honest.
 
 Core event types:
 

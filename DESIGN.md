@@ -54,17 +54,33 @@ retains final authority.
 ## Durable state and audit
 
 `SQLiteStore` is the durable implementation of the learner's preference repository and the local
-append-only audit store. Schema version 1 is installed through `PRAGMA user_version`; a database
-created by a newer application is rejected instead of guessed at. Connections enable foreign keys,
-WAL journal mode, a five-second busy timeout, and short explicit write transactions.
+append-only audit store. Ordered migrations are tracked through `PRAGMA user_version`: version 1
+adds events and preferences, and version 2 adds approvals. A database created by a newer application
+is rejected instead of guessed at. Connections enable foreign keys, WAL journal mode, a five-second
+busy timeout, and short explicit write transactions.
 
 The `audit_events` table assigns an independent monotonically increasing sequence within each
 stream. Database triggers reject updates and deletes, so append-only behavior still holds if code
 bypasses the repository. Payloads use deterministic, standards-compliant JSON and typed
 `AuditEvent` validation when read. `preference_states` is deliberately mutable because it is a
 current-state projection. A combined operation updates that projection and appends its explaining
-event in one transaction; either both commit or both roll back. Approval and execution projections
-are added with their workflows rather than being prematurely represented by unused tables.
+event in one transaction; either both commit or both roll back. Execution projections are added with
+their workflow rather than being prematurely represented by unused tables.
+
+## Approval authority
+
+An approval is an expiring, single-use authorization for one exact proposal—not a boolean attached
+to an email. Canonical UTF-8 JSON includes a schema version, proposal identity and version, email
+identity, action type, and the complete typed action payload. Its SHA-256 digest is stored in the
+approval record and compared in constant time before grant, invalidation, edit, or consumption.
+
+Only a self-consistent `ASK` decision for an enabled, non-escalated capability may create a request.
+The legal state transitions are `PENDING -> GRANTED -> CONSUMED` plus terminal rejection, expiry,
+and invalidation paths. SQLite compare-and-set updates make consumption one-time even with stale
+workers. An edit atomically invalidates the old request, increments the proposal version, and creates
+a separately expiring replacement after the revised proposal has received a new `ASK` decision.
+Every transition and its projection update commit in the same transaction. Step 17 will perform the
+fresh policy check and consume the approval at the execution boundary.
 
 ## Scope
 

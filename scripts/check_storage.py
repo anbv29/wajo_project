@@ -61,7 +61,7 @@ def main() -> None:
         db_path = temp_dir / "storage_check.sqlite3"
 
         with SQLiteStore(db_path) as store:
-            _require(store.schema_version == SCHEMA_VERSION == 1, "wrong schema version")
+            _require(store.schema_version == SCHEMA_VERSION == 2, "wrong schema version")
             checks += 1
 
             cold = store.get_preference("ctx_newsletter")

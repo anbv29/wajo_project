@@ -541,14 +541,84 @@ class Decision(StrictModel):
 
 class ApprovalRecord(StrictModel):
     approval_id: str = Field(default_factory=lambda: new_id("approval"))
-    proposal_id: str
-    proposal_version: int
-    payload_hash: str
+    proposal_id: str = Field(min_length=1, max_length=512)
+    proposal_version: int = Field(ge=1)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     status: ApprovalStatus = ApprovalStatus.PENDING
     actor: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     expires_at: datetime
+    updated_at: datetime = Field(default_factory=utc_now)
+    granted_at: datetime | None = None
     consumed_at: datetime | None = None
+    superseded_by_approval_id: str | None = None
+
+    @field_validator("approval_id", "proposal_id")
+    @classmethod
+    def clean_approval_identity(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("approval identity cannot be blank")
+        return cleaned
+
+    @field_validator("actor", "superseded_by_approval_id")
+    @classmethod
+    def clean_optional_approval_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("optional approval identity cannot be blank")
+        return cleaned
+
+    @field_validator("created_at", "expires_at", "updated_at", "granted_at", "consumed_at")
+    @classmethod
+    def require_aware_approval_time(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("approval timestamps must include a timezone")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def validate_approval_state(self) -> ApprovalRecord:
+        if self.expires_at <= self.created_at:
+            raise ValueError("approval expiry must be after creation")
+        if self.updated_at < self.created_at:
+            raise ValueError("approval update cannot precede creation")
+        if self.granted_at is not None and self.granted_at < self.created_at:
+            raise ValueError("approval grant cannot precede creation")
+        if self.consumed_at is not None and self.consumed_at < self.created_at:
+            raise ValueError("approval consumption cannot precede creation")
+
+        if self.status == ApprovalStatus.PENDING:
+            if any(
+                value is not None
+                for value in (
+                    self.actor,
+                    self.granted_at,
+                    self.consumed_at,
+                    self.superseded_by_approval_id,
+                )
+            ):
+                raise ValueError("pending approval cannot contain resolution data")
+        elif self.status == ApprovalStatus.GRANTED:
+            if self.actor is None or self.granted_at is None or self.consumed_at is not None:
+                raise ValueError("granted approval requires actor and grant time only")
+        elif self.status == ApprovalStatus.CONSUMED:
+            if self.actor is None or self.granted_at is None or self.consumed_at is None:
+                raise ValueError("consumed approval requires grant and consumption evidence")
+        elif self.status in {ApprovalStatus.REJECTED, ApprovalStatus.INVALIDATED}:
+            if self.actor is None or self.consumed_at is not None:
+                raise ValueError("user-resolved approval requires an actor and cannot be consumed")
+        elif self.status == ApprovalStatus.EXPIRED and self.consumed_at is not None:
+            raise ValueError("expired approval cannot be consumed")
+
+        if self.superseded_by_approval_id is not None and self.status != ApprovalStatus.INVALIDATED:
+            raise ValueError("only an invalidated approval can reference its replacement")
+        if self.superseded_by_approval_id == self.approval_id:
+            raise ValueError("approval cannot supersede itself")
+        return self
 
 
 class ExecutionCommand(StrictModel):
