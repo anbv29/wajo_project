@@ -1,5 +1,6 @@
 from wajo_agent.storage.sqlite import (
     SCHEMA_VERSION,
+    AgentRunStateConflictError,
     ApprovalNotFoundError,
     ApprovalStateConflictError,
     DuplicateApprovalError,
@@ -12,6 +13,7 @@ from wajo_agent.storage.sqlite import (
 
 __all__ = [
     "SCHEMA_VERSION",
+    "AgentRunStateConflictError",
     "ApprovalNotFoundError",
     "ApprovalStateConflictError",
     "DuplicateApprovalError",

@@ -2,7 +2,7 @@
 
 This repository implements an actual agent loop for proactive email management:
 
-`observe -> interpret -> assess risk -> choose autonomy -> act -> observe outcome -> learn`
+`observe -> normalize -> assess risk -> interpret -> choose autonomy -> act or wait -> learn`
 
 The LLM is the agent's semantic planner, but it has no mailbox tools. Deterministic Python policy
 owns authority, approvals bind exact payloads, and learning can reduce interruptions only for safe,
@@ -27,4 +27,3 @@ agent lifecycle without credentials or network access.
 
 See `DESIGN.md` for the concise technical design and `anbv_wajo.txt` for the exhaustive
 interviewer walkthrough.
-

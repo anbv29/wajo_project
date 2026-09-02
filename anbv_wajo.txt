@@ -571,7 +571,7 @@ allowed by this request; only bind_planner_output may then attach the applicatio
 turn it into an ActionProposal.
 
 PlannerError separates operational unavailability from a contract violation. Either failure is
-handled by the future agent loop as a safe inability to plan, never as permission to execute.
+handled by ProactiveEmailAgent as a safe audited escalation, never as permission to execute.
 
 Planner responsibilities:
 
@@ -1087,9 +1087,9 @@ What is implemented in coding Step 15:
   event type and version, JSON payload, and timezone-aware UTC occurrence time. The event version
   lets a future reader deliberately upcast an older payload instead of silently guessing its shape.
 - SQLiteStore opens or creates a versioned database. PRAGMA user_version is the migration marker.
-  Step 15 introduced schema version 1, Step 16 added approvals in version 2, and Step 17 adds
-  executions in version 3. A database from a newer application version is rejected so older code
-  cannot corrupt it.
+  Step 15 introduced schema version 1, Step 16 added approvals in version 2, Step 17 added
+  executions in version 3, and Step 18 adds durable inbound run claims in version 4. A database
+  from a newer application version is rejected so older code cannot corrupt it.
 - audit_events is the append-only source of truth. Its primary key prevents duplicate event IDs,
   its stream-and-sequence uniqueness preserves ordering, and database triggers reject UPDATE and
   DELETE even when a caller bypasses Python and sends SQL directly.
@@ -1103,9 +1103,9 @@ What is implemented in coding Step 15:
   synchronous mode. No LLM or mailbox call occurs inside a database transaction.
 
 The Step 15 schema intentionally began with only audit_events and preference_states. Step 16 adds
-approvals through migration 2, and Step 17 adds executions through migration 3. Email, decision,
-and feedback-deduplication projections are still added with later workflows that own their
-invariants. This keeps the schema honest.
+approvals through migration 2, Step 17 adds executions through migration 3, and Step 18 adds
+agent_runs through migration 4. Separate email, decision, and feedback-deduplication projections
+are still added with later workflows that own their invariants. This keeps the schema honest.
 
 Core event types:
 
@@ -1258,6 +1258,41 @@ Step 14 - collect explicit feedback
 
 Step 15 - update preference evidence
     Apply the feedback once using deduplication and append the preference update event.
+
+What is implemented in coding Step 18:
+
+- ProactiveEmailAgent is the application coordinator. It owns dependencies but does not replace
+  them: the planner still only proposes, the learner still only recommends, policy still owns
+  authority, ApprovalService still owns consent, and ExecutionService alone calls the adapter.
+- The lifecycle is now the real safety order: OBSERVE, NORMALIZE, ASSESS_RISK, INTERPRET,
+  DECIDE_AUTONOMY, ACT_OR_WAIT, and LEARN. Skipping or reordering a stage raises an error.
+- Before any parsing or planning, SQLite migration 4 uses agent_runs to claim the unique mailbox and
+  provider-message pair. A duplicate webhook delivery identifies the original run and stops before
+  creating another approval or mailbox effect.
+- Normalization converts HTML and suspicious Unicode into inert text and emits a report. RiskScanner
+  then records injection, sensitivity, truncation, invisible-character, and missing-content evidence
+  before the planner receives the normalized envelope.
+- The selected planner returns only a typed proposal. Planner unavailability, invalid output, or an
+  unexpected planner exception becomes a complete ESCALATE outcome with no proposed or executed
+  action.
+- The exact preference context loads its Beta evidence. ContextualPreferenceLearner recommends a
+  tier, but PolicyEngine independently combines it with capability and content floors.
+- SILENT executes and does not interrupt on success. NOTIFY executes and returns a user message.
+  ASK creates one pending expiring approval and never calls the mailbox. ESCALATE neither approves
+  nor executes.
+- FAILED_SAFE and UNKNOWN execution results always produce a user-facing message, even if the
+  original decision was SILENT. Runtime authorization changes stop and escalate the run.
+- AgentOutcome is a strict model that rejects contradictory combinations such as an ASK route with
+  an execution result, an escalation containing approval, or silent success backed by NOTIFY.
+- Each run receives its own ordered audit stream: email.received, email.normalized, risk.assessed,
+  proposal.created or planner.failed, decision.created, and run.completed. Approval and execution
+  have their own linked streams.
+- Reaching LEARN records that the agent is waiting for explicit feedback. Merely acting successfully
+  or receiving no complaint never changes preference evidence.
+
+The Step 18 checks run the actual offline agent through all four required autonomy paths, HTML
+normalization, prompt injection, planner outage, unknown execution, audit ordering, duplicate
+delivery, and the no-implicit-learning invariant. No network access or Gmail account is required.
 
 
 19. USER FEEDBACK FLOW

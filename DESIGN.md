@@ -8,9 +8,10 @@ through learning.**
 
 ## Agent architecture
 
-The `ProactiveEmailAgent` owns a full lifecycle: it observes an email, normalizes it, asks a
-planner for a typed proposal, scans risk, loads contextual preference evidence, applies immutable
-policy, routes the decision, observes execution, records events, and learns from explicit feedback.
+The `ProactiveEmailAgent` owns a full lifecycle: it observes an email, claims the provider message
+against duplicate delivery, normalizes it, scans risk, asks a planner for a typed proposal, loads
+contextual preference evidence, applies immutable policy, routes the decision, observes execution,
+records events, and waits for explicit feedback before learning.
 
 The planner is intentionally tool-less. Only the executor has side-effect capability, and it is
 reachable only through final policy, approval, payload-integrity, and idempotency validation.
@@ -55,9 +56,10 @@ retains final authority.
 
 `SQLiteStore` is the durable implementation of the learner's preference repository and the local
 append-only audit store. Ordered migrations are tracked through `PRAGMA user_version`: version 1
-adds events and preferences, version 2 adds approvals, and version 3 adds executions. A database
-created by a newer application is rejected instead of guessed at. Connections enable foreign keys,
-WAL journal mode, a five-second busy timeout, and short explicit write transactions.
+adds events and preferences, version 2 adds approvals, version 3 adds executions, and version 4 adds
+durable agent-run claims. A database created by a newer application is rejected instead of guessed
+at. Connections enable foreign keys, WAL journal mode, a five-second busy timeout, and short explicit
+write transactions.
 
 The `audit_events` table assigns an independent monotonically increasing sequence within each
 stream. Database triggers reject updates and deletes, so append-only behavior still holds if code
@@ -101,6 +103,21 @@ becomes `FAILED_SAFE`, and a timeout, invalid response, unexpected exception, or
 outcome becomes `UNKNOWN`. Neither terminal failures nor unknown outcomes retry automatically.
 If the process crashes after the claim, the durable `EXECUTING` row blocks a duplicate and requires
 reconciliation. The included scripted mock adapter makes each outcome reproducible offline.
+
+## End-to-end orchestration
+
+The agent records the exact stage order `OBSERVE -> NORMALIZE -> ASSESS_RISK -> INTERPRET ->
+DECIDE_AUTONOMY -> ACT_OR_WAIT -> LEARN`. The final stage explicitly records that no learning occurs
+without user feedback. A unique `(mailbox_id, provider_message_id)` run claim suppresses duplicate
+webhook delivery before normalization, planning, approval creation, or execution.
+
+`SILENT` executes without a success notification, `NOTIFY` executes and produces a user message,
+`ASK` creates an expiring pending approval without calling the mailbox, and `ESCALATE` performs no
+effect. Failed or unknown autonomous effects always surface a message even when their original tier
+was `SILENT`. Planner failure also produces a complete auditable escalation rather than permission
+to act. Each run has its own ordered event stream containing observation, normalization, risk,
+proposal, decision, and completion evidence; approval and execution details remain in their linked
+streams.
 
 ## Scope
 

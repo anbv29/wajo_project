@@ -1,7 +1,8 @@
 """The ordered lifecycle followed by every proactive-agent run.
 
 This module deliberately contains no email API, database, or LLM code. It defines what it means
-for this project to behave like an agent: observe, interpret, assess risk, decide, act, and learn.
+for this project to behave like an agent: observe, normalize, assess risk, interpret, decide, act,
+and learn.
 Later components will plug into these stages without being allowed to skip the safety stages.
 """
 
@@ -17,8 +18,9 @@ class AgentStage(StrEnum):
     """One stage in the proactive email agent's reasoning-and-action loop."""
 
     OBSERVE = "observe"
-    INTERPRET = "interpret"
+    NORMALIZE = "normalize"
     ASSESS_RISK = "assess_risk"
+    INTERPRET = "interpret"
     DECIDE_AUTONOMY = "decide_autonomy"
     ACT_OR_WAIT = "act_or_wait"
     LEARN = "learn"

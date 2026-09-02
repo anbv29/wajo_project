@@ -20,11 +20,12 @@ from wajo_agent.domain import (
     ExecutionRecord,
     ExecutionState,
     FeedbackType,
+    OutcomeRoute,
     PreferenceState,
 )
 from wajo_agent.domain.models import new_id, utc_now
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 FEEDBACK_LIST_ADAPTER = TypeAdapter(list[str])
 
 MIGRATION_V1 = """
@@ -146,10 +147,37 @@ PRAGMA user_version = 3;
 COMMIT;
 """
 
+MIGRATION_V4 = """
+BEGIN IMMEDIATE;
+
+CREATE TABLE agent_runs (
+    run_id TEXT PRIMARY KEY,
+    mailbox_id TEXT NOT NULL,
+    provider_message_id TEXT NOT NULL,
+    email_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('processing', 'completed')),
+    outcome_route TEXT,
+    decision_tier TEXT,
+    execution_state TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (mailbox_id, provider_message_id),
+    CHECK (updated_at >= created_at),
+    CHECK (status != 'completed' OR (outcome_route IS NOT NULL AND decision_tier IS NOT NULL))
+);
+
+CREATE INDEX idx_agent_runs_status
+    ON agent_runs (status, updated_at);
+
+PRAGMA user_version = 4;
+COMMIT;
+"""
+
 MIGRATIONS = {
     1: MIGRATION_V1,
     2: MIGRATION_V2,
     3: MIGRATION_V3,
+    4: MIGRATION_V4,
 }
 
 
@@ -179,6 +207,10 @@ class DuplicateApprovalError(StorageError):
 
 class ExecutionStateConflictError(StorageError):
     """An execution changed between observation and attempted transition."""
+
+
+class AgentRunStateConflictError(StorageError):
+    """An agent run changed or completed before the requested transition."""
 
 
 class SQLiteStore:
@@ -729,6 +761,110 @@ class SQLiteStore:
             raise ExecutionStateConflictError(
                 "execution identity or idempotency key already exists"
             ) from exc
+
+    def claim_agent_run(
+        self,
+        *,
+        run_id: str,
+        mailbox_id: str,
+        provider_message_id: str,
+        email_id: str,
+        source: str,
+        occurred_at: datetime,
+    ) -> tuple[str, bool]:
+        """Claim one provider message before planning and reject duplicate deliveries."""
+        identities = tuple(
+            value.strip() for value in (run_id, mailbox_id, provider_message_id, email_id)
+        )
+        if any(not value for value in identities):
+            raise ValueError("agent run identities cannot be blank")
+        cleaned_run, cleaned_mailbox, cleaned_provider, cleaned_email = identities
+        with self._write_transaction():
+            existing = self._connection.execute(
+                """
+                SELECT run_id
+                FROM agent_runs
+                WHERE mailbox_id = ? AND provider_message_id = ?
+                """,
+                (cleaned_mailbox, cleaned_provider),
+            ).fetchone()
+            if existing is not None:
+                return str(existing["run_id"]), False
+
+            self._connection.execute(
+                """
+                INSERT INTO agent_runs (
+                    run_id, mailbox_id, provider_message_id, email_id, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'processing', ?, ?)
+                """,
+                (
+                    cleaned_run,
+                    cleaned_mailbox,
+                    cleaned_provider,
+                    cleaned_email,
+                    occurred_at.isoformat(),
+                    occurred_at.isoformat(),
+                ),
+            )
+            self._insert_event(
+                stream_id=f"run:{cleaned_run}",
+                event_type="email.received",
+                payload={
+                    "email_id": cleaned_email,
+                    "provider_message_id": cleaned_provider,
+                    "source": source,
+                },
+                event_version=1,
+                event_id=None,
+                occurred_at=occurred_at,
+            )
+        return cleaned_run, True
+
+    def complete_agent_run(
+        self,
+        *,
+        run_id: str,
+        route: OutcomeRoute,
+        decision_tier: AutonomyTier,
+        execution_state: ExecutionState | None,
+        occurred_at: datetime,
+    ) -> None:
+        """Complete a claimed run and append its final event atomically."""
+        with self._write_transaction():
+            cursor = self._connection.execute(
+                """
+                UPDATE agent_runs
+                SET status = 'completed', outcome_route = ?, decision_tier = ?,
+                    execution_state = ?, updated_at = ?
+                WHERE run_id = ? AND status = 'processing'
+                """,
+                (
+                    route.value,
+                    decision_tier.value,
+                    execution_state.value if execution_state is not None else None,
+                    occurred_at.isoformat(),
+                    run_id.strip(),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise AgentRunStateConflictError(
+                    f"agent run is missing or already complete: {run_id.strip()}"
+                )
+            self._insert_event(
+                stream_id=f"run:{run_id.strip()}",
+                event_type="run.completed",
+                payload={
+                    "route": route.value,
+                    "decision_tier": decision_tier.value,
+                    "execution_state": (
+                        execution_state.value if execution_state is not None else None
+                    ),
+                },
+                event_version=1,
+                event_id=None,
+                occurred_at=occurred_at,
+            )
 
     def close(self) -> None:
         self._connection.close()

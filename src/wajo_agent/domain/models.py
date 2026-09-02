@@ -104,6 +104,15 @@ class ExecutionState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class OutcomeRoute(StrEnum):
+    EXECUTED_SILENTLY = "executed_silently"
+    EXECUTED_AND_NOTIFY = "executed_and_notify"
+    AWAITING_APPROVAL = "awaiting_approval"
+    ESCALATED = "escalated"
+    EXECUTION_FAILED = "execution_failed"
+    EXECUTION_UNKNOWN = "execution_unknown"
+
+
 class InjectionSignal(StrEnum):
     """Prompt-injection techniques observed in untrusted email text."""
 
@@ -801,9 +810,81 @@ class ExecutionRecord(StrictModel):
 
 
 class AgentOutcome(StrictModel):
+    run_id: str = Field(min_length=1, max_length=512)
     email: EmailEnvelope
     proposal: ActionProposal | None
     risk: RiskAssessment
+    preference: PreferenceRecommendation | None = None
     decision: Decision
+    route: OutcomeRoute
     approval: ApprovalRecord | None = None
     execution: ExecutionResult | None = None
+    user_message: str | None = Field(default=None, max_length=2_000)
+
+    @field_validator("run_id")
+    @classmethod
+    def clean_run_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("run_id cannot be blank")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_outcome_route(self) -> AgentOutcome:
+        if self.proposal is None:
+            if self.decision.tier != AutonomyTier.ESCALATE:
+                raise ValueError("missing proposal requires escalation")
+            if self.preference is not None:
+                raise ValueError("missing proposal cannot have a preference recommendation")
+        elif self.proposal.email_id != self.email.email_id:
+            raise ValueError("outcome proposal belongs to another email")
+
+        if self.route == OutcomeRoute.AWAITING_APPROVAL:
+            if self.decision.tier != AutonomyTier.ASK:
+                raise ValueError("approval route requires an ASK decision")
+            if self.approval is None or self.execution is not None:
+                raise ValueError("approval route requires approval and no execution")
+        elif self.route == OutcomeRoute.ESCALATED:
+            if self.decision.tier != AutonomyTier.ESCALATE:
+                raise ValueError("escalation route requires an ESCALATE decision")
+            if self.approval is not None or self.execution is not None:
+                raise ValueError("escalation cannot approve or execute")
+        else:
+            if self.execution is None or self.approval is not None:
+                raise ValueError("execution route requires a result and no approval request")
+            if self.route == OutcomeRoute.EXECUTION_FAILED and (
+                self.execution.state != ExecutionState.FAILED_SAFE
+            ):
+                raise ValueError("failed route requires FAILED_SAFE result")
+            if self.route == OutcomeRoute.EXECUTION_UNKNOWN and (
+                self.execution.state != ExecutionState.UNKNOWN
+            ):
+                raise ValueError("unknown route requires UNKNOWN result")
+            if (
+                self.route
+                in {
+                    OutcomeRoute.EXECUTED_SILENTLY,
+                    OutcomeRoute.EXECUTED_AND_NOTIFY,
+                }
+                and self.execution.state != ExecutionState.SUCCEEDED
+            ):
+                raise ValueError("successful execution route requires SUCCEEDED result")
+            if (
+                self.route == OutcomeRoute.EXECUTED_SILENTLY
+                and self.decision.tier != AutonomyTier.SILENT
+            ):
+                raise ValueError("silent route requires a SILENT decision")
+            if (
+                self.route == OutcomeRoute.EXECUTED_AND_NOTIFY
+                and self.decision.tier != AutonomyTier.NOTIFY
+            ):
+                raise ValueError("notify route requires a NOTIFY decision")
+            if self.route in {
+                OutcomeRoute.EXECUTION_FAILED,
+                OutcomeRoute.EXECUTION_UNKNOWN,
+            } and self.decision.tier not in {AutonomyTier.SILENT, AutonomyTier.NOTIFY}:
+                raise ValueError("autonomous failure requires a SILENT or NOTIFY decision")
+
+        if self.user_message is not None and not self.user_message.strip():
+            raise ValueError("user message cannot be blank")
+        return self
