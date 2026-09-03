@@ -11,7 +11,7 @@ reversible actions.
 ## Quick start
 
 ```powershell
-uv sync --extra dev
+uv sync --extra dev --extra eval
 uv run wajo demo --reset
 uv run pytest
 uv run python scripts/run_quality_gates.py
@@ -71,6 +71,16 @@ uv run python scripts/run_evaluation.py --split held_out --confirm-held-out
 
 Add `--planner openai --repeats 3` for an explicitly networked variability run after configuring
 `OPENAI_API_KEY`; offline evaluation is deterministic and credential-free.
+
+Generate the complete submission report from development data with:
+
+```powershell
+uv run python scripts/generate_reports.py
+```
+
+This writes versioned raw JSON, reproducibility metadata, predeclared release gates, a readable
+summary, 95% Wilson confidence intervals, and three PNG charts to `reports/`. Held-out report
+generation is separately guarded by `--confirm-held-out`, just like direct evaluation.
 
 See `DESIGN.md` for the concise technical design and `anbv_wajo.txt` for the exhaustive
 interviewer walkthrough.

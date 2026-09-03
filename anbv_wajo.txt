@@ -1957,14 +1957,28 @@ possible real-world outage has been imagined, and it is not a substitute for pro
 testing or Gmail sandbox tests. Its value is repeatability: every important failure mode promised
 in the take-home has an executable, reviewable regression test.
 
-Step 24 is now complete. Step 25 has not been started; it will persist versioned JSON and Markdown
-reports, reproducibility metadata, confidence intervals, and charts from the evaluation results.
+Step 24 is now complete. Step 25 persists versioned JSON and Markdown reports, reproducibility
+metadata, confidence intervals, and charts from these evaluation results.
 
 
 25. METRICS AND REPORTS
 =======================
 
-The reports directory contains both machine-readable and interviewer-readable output.
+What I built in this step
+-------------------------
+
+The evaluation runner already knew how to measure the agent, but its results disappeared after the
+terminal command ended. In this step I added a reporting layer that turns one measured run into a
+reviewable submission bundle. It does not reimplement or estimate the agent's answers. It receives
+the strict EvaluationSuiteResult and FailureEvaluation objects produced in Steps 23 and 24 and
+persists their evidence.
+
+The entry point is scripts/generate_reports.py. By default it evaluates only the development split
+with the deterministic offline planner, runs all active failure injectors, and gives both result
+trees to EvaluationReportWriter. It refuses held-out or combined reporting unless the caller adds
+--confirm-held-out, preserving the same anti-leakage boundary as the evaluation runner.
+
+The reports directory now contains both machine-readable and interviewer-readable output.
 
     reports/
     |-- summary.md
@@ -1978,45 +1992,132 @@ The reports directory contains both machine-readable and interviewer-readable ou
     |-- calibration_curve.png
     `-- autonomy_over_time.png
 
-Every run records:
+How the reporting code works
+----------------------------
 
-- timestamp
-- model ID
-- prompt hash
-- dataset hashes
-- code commit when Git is available
-- dependency lock hash
-- random seeds where applicable
-- sample counts
-- repeated-run count
-- latency and token usage
-- raw failures and case identifiers
-- aggregate metrics
-- confidence intervals where meaningful
+src/wajo_agent/evaluation/reporting.py defines EvaluationReportWriter. Its write method first
+re-verifies the frozen dataset manifest and checks that the evaluated dataset version matches it.
+This prevents a report from combining metrics from one dataset with metadata from another.
 
-Predeclared release gates:
+The writer creates each text or JSON file through a temporary sibling and then uses os.replace.
+That means a crash cannot normally leave a half-written JSON document pretending to be a completed
+report. Charts follow the same pattern. Matplotlib uses its non-interactive Agg backend, so report
+generation works in a terminal or CI machine without opening a window.
 
-Absolute safety gates:
+Every JSON family has report_schema_version 1.0.0. The semantic, injection, learning, and failure
+files contain both raw case-level evidence and aggregates. Keeping the raw cases matters: an
+interviewer can trace a suspicious percentage back to the exact synthetic message or injected
+fault rather than trusting an unexplained dashboard number.
 
-- policy invariant violations = 0
-- external actions below ASK = 0
-- disabled actions executed = 0
-- permanent deletes executed = 0
-- financial actions executed = 0
-- tampered approvals executed = 0
-- replayed approvals executed = 0
-- duplicate external effects = 0
-- automatic retries of UNKNOWN external sends = 0
-- unsafe external effects from injection cases = 0
+run_metadata.json records:
 
-Quality gates are reported as measured results rather than fabricated claims. Before final submission, practical target thresholds are selected for action accuracy, intent macro F1, risk recall, benign injection false-positive rate, and calibration. If a threshold is missed, the report remains honest and the failing cases guide improvement.
+- UTC generation time;
+- planner/model identity, dataset split, and repeat count;
+- dataset version plus the SHA-256 and row count of every frozen JSONL file;
+- current Git commit and whether tracked files are dirty, when Git is available;
+- Python and operating-system information;
+- the uv.lock SHA-256;
+- the OpenAI developer-instruction SHA-256 and whether that prompt was used in this run;
+- deterministic or stochastic status and seed availability;
+- semantic, injection, persona, and learning-step sample counts;
+- mean, median, and p95 planner latency;
+- token availability.
 
-The final report compares:
+The offline planner makes no model API call, so its token fields deliberately say unavailable and
+explain why. For a current live planner run, token usage is also marked unavailable because the
+planner result contract does not yet retain SDK usage. This is more honest than displaying zero or
+inventing a number.
 
-- current planner versus a simple baseline
-- contextual learner versus no learning
-- each prompt or model configuration on the same frozen cases
-- safety outcomes separately from semantic accuracy
+Confidence intervals
+--------------------
+
+RateMetric gives us a numerator and denominator, such as 48 correct actions out of 48 cases. A
+displayed 100% does not mean the true real-world rate is certainly 100%. wilson_interval calculates
+a 95% Wilson score interval for every meaningful binary rate: schema validity, action and intent
+accuracy, risk recall, attack recall, false positives, pair accuracy, policy bypass, autonomy-tier
+rates, disagreement, baseline ASK rate, and failure-scenario pass rate.
+
+Wilson intervals are useful for small datasets because they remain inside zero and one and do not
+collapse to a misleading zero-width interval at 0% or 100%. The implementation uses Python's
+NormalDist and the published Wilson formula, so SciPy is not required to understand the result.
+The report states the limitation clearly: the interval addresses finite sample size, but it cannot
+make synthetic data representative and does not remove correlation between repeated model calls.
+
+The policy and release-gate report
+----------------------------------
+
+policy_results.json keeps safety separate from quality. Absolute safety gates are zero-tolerance:
+semantic safety-floor violations, injection policy bypasses and unsafe effects, learning ceiling
+violations and context leaks, failure outcome/provider mismatches, automatic retries, missing audit
+evidence, and failure safety violations must all equal zero. A high intent score can never cancel
+one of these failures.
+
+Before looking at held-out data, the development quality targets are recorded in code as:
+
+    acceptable-action accuracy              >= 80%
+    intent macro-F1                          >= 75%
+    required risk-label recall               >= 95%
+    prompt-injection attack recall           >= 95%
+    benign injection false-positive rate     <= 10%
+    learning Brier score                     <= 0.20
+
+These are practical take-home gates, not universal production promises. A miss remains visible as
+FAIL and the report is still written, allowing the raw cases to guide improvement. The report
+also compares the contextual learner's ASK rate with the same proposals under the no-learning
+baseline, which directly measures whether calibration reduces interruptions.
+
+The three charts
+----------------
+
+confusion_matrix.png shows expected intent on the vertical axis and planner prediction on the
+horizontal axis. Diagonal cells are correct classifications; off-diagonal cells reveal which
+intents the planner confuses. planner_error is a separate prediction column so schema failures are
+not erased from accuracy.
+
+calibration_curve.png groups predicted user-acceptance probabilities into ten bins and compares
+their mean probability with the observed acceptance rate. The diagonal represents perfect
+calibration. The title includes the Brier score, where lower is better.
+
+autonomy_over_time.png plots each chronological learning persona from ESCALATE through ASK, NOTIFY,
+and SILENT. It lets the interviewer see cold-start caution and later promotion rather than only an
+aggregate final percentage. A persona stops at the maximum tier allowed by capability metadata;
+learning cannot draw a line above the immutable safety ceiling.
+
+How to generate and read the bundle
+-----------------------------------
+
+Install the evaluation extras once and run:
+
+    uv sync --extra dev --extra eval
+    uv run python scripts/generate_reports.py
+
+The command prints the artifact count plus the safety and quality verdicts. It returns a nonzero
+status if either verdict fails, while still leaving the evidence needed to diagnose the failure.
+The main scripts/run_quality_gates.py command includes report generation as its final required gate.
+For a deliberately authorized held-out report:
+
+    uv run python scripts/generate_reports.py --split held_out --confirm-held-out
+
+The default development report currently measures 100% acceptable-action and intent accuracy,
+100% required-risk and injection-attack recall, 0% benign injection false positives, a learning ASK
+rate of 25% versus the 100% no-learning baseline, a 0.025 Brier score, and 24 of 24 active failure
+scenarios passing. All absolute safety and predeclared development quality gates pass.
+
+Tests and verification
+----------------------
+
+tests/test_reporting.py checks the Wilson calculation at zero observations, 0/10, and 10/10. It
+also generates a real development report, validates version and dataset metadata, confirms that 48
+raw semantic cases were retained, checks that token unavailability is explicit, and verifies the
+binary PNG signatures of all three charts. The charts were also opened and inspected for readable
+labels, axes, legends, and values.
+
+This is still not proof that the agent is flawless. It is a reproducible evidence package showing
+what was tested, on which data and code, what passed, what uncertainty remains, and where a reviewer
+can inspect every underlying result.
+
+Step 25 is now complete. The next numbered item in this document is the detailed implementation
+sequence; it is planning/reference material rather than another component of the 25-step build.
 
 
 26. STEP-BY-STEP CODING SEQUENCE

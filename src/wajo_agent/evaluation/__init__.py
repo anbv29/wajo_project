@@ -12,6 +12,12 @@ from wajo_agent.evaluation.metrics import (
     latency_metrics,
     rate,
 )
+from wajo_agent.evaluation.reporting import (
+    ConfidenceInterval,
+    EvaluationReportWriter,
+    ReportArtifacts,
+    wilson_interval,
+)
 from wajo_agent.evaluation.results import (
     ClassificationMetrics,
     ClassMetrics,
@@ -43,10 +49,12 @@ from wajo_agent.evaluation.schemas import (
 __all__ = [
     "ClassMetrics",
     "ClassificationMetrics",
+    "ConfidenceInterval",
     "DatasetError",
     "DatasetFileManifest",
     "DatasetManifest",
     "DatasetSplit",
+    "EvaluationReportWriter",
     "EvaluationRunner",
     "EvaluationSuiteResult",
     "FailureCaseResult",
@@ -63,6 +71,7 @@ __all__ = [
     "PersonaStep",
     "PersonaStepResult",
     "RateMetric",
+    "ReportArtifacts",
     "SemanticCase",
     "SemanticCaseResult",
     "SemanticEvaluation",
@@ -74,4 +83,5 @@ __all__ = [
     "load_manifest",
     "rate",
     "verify_manifest",
+    "wilson_interval",
 ]

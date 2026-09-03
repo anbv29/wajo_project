@@ -18,6 +18,7 @@ REQUIRED_MODULES = (
     "rich",
     "typer",
     "hypothesis",
+    "matplotlib",
     "pytest",
     "ruff",
     "pyright",
