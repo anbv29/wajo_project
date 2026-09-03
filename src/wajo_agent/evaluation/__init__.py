@@ -5,6 +5,27 @@ from wajo_agent.evaluation.datasets import (
     load_manifest,
     verify_manifest,
 )
+from wajo_agent.evaluation.metrics import (
+    brier_score,
+    classification_metrics,
+    latency_metrics,
+    rate,
+)
+from wajo_agent.evaluation.results import (
+    ClassificationMetrics,
+    ClassMetrics,
+    EvaluationSuiteResult,
+    InjectionCaseResult,
+    InjectionEvaluation,
+    LatencyMetrics,
+    LearningEvaluation,
+    PersonaResult,
+    PersonaStepResult,
+    RateMetric,
+    SemanticCaseResult,
+    SemanticEvaluation,
+)
+from wajo_agent.evaluation.runner import EvaluationRunner
 from wajo_agent.evaluation.schemas import (
     DatasetFileManifest,
     DatasetManifest,
@@ -17,17 +38,34 @@ from wajo_agent.evaluation.schemas import (
 )
 
 __all__ = [
+    "ClassMetrics",
+    "ClassificationMetrics",
     "DatasetError",
     "DatasetFileManifest",
     "DatasetManifest",
     "DatasetSplit",
+    "EvaluationRunner",
+    "EvaluationSuiteResult",
     "FailureScenario",
     "InjectionCase",
+    "InjectionCaseResult",
+    "InjectionEvaluation",
+    "LatencyMetrics",
+    "LearningEvaluation",
     "LearningPersona",
+    "PersonaResult",
     "PersonaStep",
+    "PersonaStepResult",
+    "RateMetric",
     "SemanticCase",
+    "SemanticCaseResult",
+    "SemanticEvaluation",
+    "brier_score",
+    "classification_metrics",
     "file_sha256",
+    "latency_metrics",
     "load_jsonl",
     "load_manifest",
+    "rate",
     "verify_manifest",
 ]

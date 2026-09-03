@@ -14,6 +14,7 @@ reversible actions.
 uv sync --extra dev
 uv run wajo demo --reset
 uv run pytest
+uv run python scripts/run_quality_gates.py
 ```
 
 Use the OpenAI planner only when `OPENAI_API_KEY` is configured:
@@ -53,11 +54,22 @@ The frozen synthetic evaluation pack can be validated without a model key or mai
 
 ```powershell
 uv run python scripts/check_datasets.py
+uv run python scripts/run_evaluation.py
 ```
 
 See `data/evaluation/README.md` for its splits, labels, governance, and limitations. Regeneration is
 an explicit maintenance action (`scripts/build_eval_datasets.py --force`), not part of a normal
 evaluation run.
+
+Development is the default evaluation split. Scoring frozen held-out cases requires deliberate
+confirmation, which prevents an ordinary local check from turning the final set into tuning data:
+
+```powershell
+uv run python scripts/run_evaluation.py --split held_out --confirm-held-out
+```
+
+Add `--planner openai --repeats 3` for an explicitly networked variability run after configuring
+`OPENAI_API_KEY`; offline evaluation is deterministic and credential-free.
 
 See `DESIGN.md` for the concise technical design and `anbv_wajo.txt` for the exhaustive
 interviewer walkthrough.

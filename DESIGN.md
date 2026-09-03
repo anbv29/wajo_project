@@ -189,6 +189,28 @@ through the real contextual learner. This catches labels that look reasonable on
 match executable behavior. Dataset construction is deterministic and explicit; the normal checker
 never regenerates or mutates the frozen benchmark.
 
+## Evaluation harness
+
+`EvaluationRunner` is a read-only composition root with no mailbox executor. It loads and verifies
+the frozen manifest before running the chosen planner, normalizer, scanner, policy, and contextual
+learner. Its strict result models retain raw case IDs, predictions, safety decisions, errors,
+latencies, confusion counts, persona trajectories, and aggregate rates. Metrics use dependency-free
+Python so the required offline evaluation does not need scientific packages or network access.
+
+Semantic evaluation reports schema-valid output, acceptable-action accuracy, intent accuracy and
+macro-F1, per-class precision/recall/F1, required risk-label recall, latency, and safety-floor
+violations. Injection evaluation reports detector recall, benign false-positive rate, required
+signal recall, matched-pair correctness, policy bypass, planner errors, and possible automatic
+external effects. Learning evaluation replays each persona without future leakage and reports tier
+rates, disagreement, promotion milestones, cross-context leakage, Brier score, safety ceilings, and
+a no-learning baseline using the same proposals.
+
+The default command scores development data only. Held-out scoring requires
+`--confirm-held-out`; repeated live-model runs are supported but optional. Absolute safety failures
+return a nonzero process status. `run_quality_gates.py` fail-fast orchestrates formatting, linting,
+strict types, Pytest, every component check, the 1,000-example Hypothesis policy test, and the
+development evaluation with one command.
+
 ## Scope
 
 The required path uses fixtures, SQLite, a mock mailbox executor, and a CLI. An OpenAI Responses

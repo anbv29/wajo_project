@@ -1624,86 +1624,199 @@ and Step 25 produces the final measured report.
 23. TEST AND EVALUATION STRATEGY
 ================================
 
-The word flawless is not used as a claim. LLM output is nondeterministic. The engineering goal is zero observed safety-floor violations in deterministic and adversarial testing, plus honestly measured semantic and calibration quality.
+In this step I built the machinery that answers the interviewer's most important question: "What
+measured evidence shows that this agent works?" I do not call the agent flawless. An LLM is
+nondeterministic and a small synthetic benchmark cannot prove production correctness. Instead, I
+make every claim narrow, reproducible, and connected to a raw case result.
 
-Layer 1 - static checks
+The test pyramid
+----------------
 
-- ruff format --check
-- ruff check
-- pyright or mypy strict checking
-- dependency and secret scanning where available
+The repository now has several complementary test layers. They are intentionally not substitutes
+for one another.
 
-Layer 2 - unit tests
+1. Static checks catch code-shape problems before execution.
 
-Test every domain constructor, canonicalizer, capability, policy branch, Beta update, context builder, state transition, approval rule, and idempotency function.
+   Ruff verifies formatting and lint rules. Pyright checks all production source in strict mode.
+   These catch unused imports, suspicious constructs, incorrect types, and broken interfaces.
 
-Layer 3 - property tests
+2. Component checks exercise deterministic behavior.
 
-Generate at least 1,000 combinations and enforce:
+   The existing scripts cover domain contracts, planner isolation, policy, context construction,
+   learning, SQLite migrations and transactions, approvals, idempotent execution, feedback,
+   offline and OpenAI planner adapters, the complete agent loop, CLI behavior, Gmail mapping, and
+   frozen dataset integrity. At the start of this step these already supplied 349 behavioral checks
+   plus 936 dataset validations.
 
-- external action tier is never below ASK
-- financial action always escalates
-- disabled action is never executable
-- injection always escalates when detected
-- permanent delete is never executable
-- unknown action fails closed
-- invalid proposal fails closed
-- mismatched, used, expired, or revoked approval cannot execute
-- learning cannot modify the capability catalogue
+3. Pytest provides a conventional reviewer entry point.
 
-Layer 4 - integration tests
+   tests/test_metrics.py checks classification arithmetic, Brier score, percentile latency, error
+   columns, unsupported classes, and invalid inputs. tests/test_evaluation_runner.py verifies the
+   complete development evaluator, explicit split selection, and the important case where every
+   planner call fails. Planner failure destroys semantic accuracy but still cannot authorize an
+   action; this separates quality failure from safety failure.
 
-Use a temporary SQLite database and fake planner/executor to verify event order, transactions, feedback deduplication, preference projection, approval consumption, and restart behavior.
+4. Hypothesis tests the policy as a property, not as a handful of examples.
 
-Layer 5 - live-model semantic evaluation
+   tests/test_policy_properties.py deterministically generates 1,000 combinations across all
+   actions, all four preference recommendations, injection signals, sensitive categories,
+   normalization findings, and missing-information states. For every generated combination the
+   final decision must remain at least as restrictive as the capability and preference floors.
+   External or destructive actions can never fall below ASK. Any injection, hard-sensitive
+   category, disabled capability, or financial action must ESCALATE and must not execute. A separate
+   assertion proves the capability catalogue remains an immutable MappingProxyType.
 
-Call the configured planner model on the frozen dataset. Measure:
+Why examples plus properties are both necessary
+------------------------------------------------
 
-- schema-valid output rate
-- action accuracy
+An example test can explain one business story clearly, such as an expired approval being rejected.
+A property test explores combinations a developer might not think to write manually. However,
+property generation cannot judge whether "Weekly digest" should be classified as a newsletter.
+That semantic judgment belongs to the labeled dataset. The combination gives broad safety coverage
+and understandable product examples.
+
+The read-only evaluation runner
+-------------------------------
+
+src/wajo_agent/evaluation/runner.py defines EvaluationRunner. This object receives a Planner but
+deliberately receives no MailboxExecutor, ApprovalService, Gmail transport, or access token. It can
+ask the AI for a proposal and pass the proposal into deterministic policy, but evaluation can never
+change a mailbox. That architectural omission is safer than relying on a command-line flag.
+
+Before scoring, the runner loads manifest.json, checks every dataset SHA-256 and row count, and
+validates every JSONL row. It can select development, held_out, or all and can repeat model calls to
+measure nondeterminism. It catches an individual planner exception, records only the exception type,
+assigns the same safe ESCALATE outcome used by the agent's failure path, and continues so one bad
+case does not erase the rest of the report.
+
+The result contracts
+--------------------
+
+src/wajo_agent/evaluation/results.py contains frozen Pydantic result models. RateMetric stores its
+numerator and denominator as well as a computed value, so a report never hides sample size behind a
+percentage. Every semantic and attack result retains its case ID, split, repetition, expected and
+actual values, safety tier, and error. Every persona retains its complete chronological tier and
+confidence trace. Aggregate objects are therefore convenient summaries, not replacements for raw
+evidence.
+
+src/wajo_agent/evaluation/metrics.py implements the small amount of statistics required here using
+the Python standard library. The required evaluation does not need NumPy, scikit-learn, SciPy, a
+network, or a model key. Inputs with inconsistent lengths, invalid probabilities, negative latency,
+or unknown expected labels raise errors instead of producing plausible-looking numbers.
+
+Semantic scoring
+----------------
+
+For each selected semantic email, the evaluator performs the real sequence:
+
+    normalize -> scan risk -> plan -> validate and bind -> cold preference -> deterministic policy
+
+It calculates:
+
+- schema-valid rate: how often the planner produced a contract-valid proposal
+- acceptable-action accuracy: whether the proposed action is one of the annotated safe answers
 - intent accuracy
-- macro F1
-- per-class recall
-- risk-flag recall
-- confusion matrix
-- latency and token usage
+- per-intent precision, recall, F1, and support
+- macro precision, recall, and F1, giving small intent classes equal importance
+- a complete confusion matrix with a separate planner_error column
+- required risk-label recall
+- mean, median, and nearest-rank p95 planner latency
+- safety-floor violations with their exact case IDs
 
-Run the model evaluation multiple times with fixed prompt, model configuration, dataset, and application version. Model variability should appear in the report instead of being hidden.
+Macro-F1 is the arithmetic mean of each intent's F1. It prevents a common class such as newsletter
+from hiding failure on a rarer but important class such as account recovery.
 
-Layer 6 - injection evaluation
+Injection scoring
+-----------------
 
-Measure:
+Every attack and benign control is normalized and scanned. The resulting proposal is intentionally
+combined with the most permissive SILENT preference recommendation. This is a deliberate stress
+test: learning is trying to be maximally autonomous, so the content-risk floor must still win.
 
-- attack success rate
-- injection detection recall
-- paired benign false-positive rate
-- correct paired classification
-- unsafe external effect count
+The evaluator reports attack detection recall, benign false-positive rate, required-signal recall,
+matched-pair correctness, planner errors, attack policy-bypass rate, and potential automatic
+external effects. A detector miss and a policy failure are kept separate. This makes it possible to
+improve detection honestly while preserving the absolute requirement that an adversarial email
+never causes an unsafe external effect.
 
-Even if detector recall is imperfect, unsafe external effects must remain zero because the architecture has independent capability and approval floors.
+Chronological learning scoring
+------------------------------
 
-Layer 7 - learning evaluation
+Each persona receives a fresh in-memory preference repository and is replayed from step 1 onward.
+At step t, only feedback from steps before t exists. The runner records the learner's posterior mean
+before feedback, passes its tier recommendation through policy, chooses feedback appropriate for
+the actual route, and then updates evidence exactly once.
 
-Measure:
+It reports ASK, NOTIFY, SILENT, and disagreement rates; first promotion steps; milestone failures;
+safety-ceiling violations; cross-context leakage; and Brier score. Brier score is the mean squared
+difference between predicted acceptance probability and the observed binary acceptance outcome;
+zero is perfect and lower is better. Planner failures have no invented user outcome and are
+excluded from Brier calculation.
 
-- ASK, NOTIFY, and SILENT rate over time
-- user disagreement rate
-- time to promotion
-- time to demotion
-- cross-context leakage
-- Brier score
-- calibration curve
-- comparison with a no-learning baseline
+The comparison baseline runs the same proposal and policy with a fresh cold learner at every step.
+This isolates the benefit of learning instead of comparing against another planner. The evaluator
+also changes the sender after training and verifies that evidence from the original narrow context
+does not make the new sender autonomous.
 
-The expected qualitative result is fewer unnecessary asks in repeatedly approved safe contexts, with no increase in unsafe autonomy and immediate demotion after rejection.
+Development and held-out discipline
+-----------------------------------
 
-Layer 8 - end-to-end tests
+scripts/run_evaluation.py defaults to development data. A held-out or combined run is rejected
+unless --confirm-held-out is present. Normal Pytest runs also exclude the test marked heldout. This
+does not pretend the repository text is secret; it prevents accidental repeated scoring from
+turning the final cases into prompt-tuning feedback.
 
-Run fixture email through normalization, planner, detector, policy, learner, router, approval, executor, events, feedback, and learning. Verify both returned output and persisted audit state.
+The commands are:
 
-Layer 9 - manual review
+    uv run python scripts/run_evaluation.py
+    uv run python scripts/run_evaluation.py --json
+    uv run python scripts/run_evaluation.py --planner openai --repeats 3
+    uv run python scripts/run_evaluation.py --split held_out --confirm-held-out
 
-Inspect every final eval failure, the worst-confidence cases, ambiguous items, all escalation reasons, the five demo transcripts, and the generated charts. Automated numbers are combined with human judgment.
+The JSON option emits the complete strict result tree for Step 25's reporting layer. The OpenAI
+option is explicitly networked and requires OPENAI_API_KEY. Offline mode is the required,
+deterministic, credential-free path.
+
+One submission command
+----------------------
+
+scripts/run_quality_gates.py is the fail-fast reviewer command. It runs formatting, linting, strict
+types, Pytest, every component-check script, frozen dataset validation, and development evaluation.
+It stops at the first nonzero exit status and names the failing gate. Absolute evaluation safety
+failures also return a nonzero status, which makes the command suitable for CI.
+
+Current measured development result
+-----------------------------------
+
+The offline reference run currently measures:
+
+    schema-valid output                 100.0%
+    acceptable-action accuracy          100.0%
+    intent accuracy                     100.0%
+    intent macro-F1                       1.000
+    required risk-label recall          100.0%
+    injection attack recall             100.0%
+    benign injection false positives      0.0%
+    correctly classified attack pairs   100.0%
+    attack policy bypass                  0.0%
+    learning ASK rate                    25.0%
+    learning NOTIFY rate                 50.0%
+    learning SILENT rate                 25.0%
+    no-learning baseline ASK rate       100.0%
+    learning Brier score                  0.025
+    absolute safety gates                  PASS
+
+These perfect semantic numbers describe the deterministic offline reference planner on the small
+synthetic dataset designed around its documented rules. They are not presented as real-world model
+accuracy. A live-model run is expected to be imperfect and variable, which is exactly why the
+harness records repetitions, errors, raw case IDs, confusion counts, and latency.
+
+What remains separate
+---------------------
+
+Step 23 scores normal, adversarial, and learning behavior and supplies the complete quality-gate
+command. Step 24 will connect the failure contracts to active fault injectors. Step 25 will persist
+versioned JSON and Markdown reports, reproducibility metadata, confidence intervals, and charts.
 
 
 24. FAILURE-INJECTION TESTING
