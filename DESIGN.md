@@ -209,7 +209,30 @@ The default command scores development data only. Held-out scoring requires
 `--confirm-held-out`; repeated live-model runs are supported but optional. Absolute safety failures
 return a nonzero process status. `run_quality_gates.py` fail-fast orchestrates formatting, linting,
 strict types, Pytest, every component check, the 1,000-example Hypothesis policy test, and the
-development evaluation with one command.
+development and failure-injection evaluations with one command.
+
+## Active failure injection
+
+`FailureInjectionRunner` turns every frozen row in `failures.jsonl` into an executable fault. Its
+registry must exactly match the dataset IDs, so adding or removing a declared failure without an
+injector fails the suite. The runner exercises production planner, orchestration, approval,
+execution, feedback, SQLite, and Gmail-adapter seams with controlled failing doubles; it does not
+replace those services with a second implementation.
+
+The 24 scenarios cover planner timeouts and malformed or forbidden proposals; duplicate delivery
+and claim failure; approval expiry, replay, payload/version tampering, and concurrent use; safe and
+ambiguous executor failures; crash-after-claim reconciliation; duplicate execution; feedback
+deduplication, evidence rejection, and transaction rollback; future-schema and append-only audit
+protection; plus Gmail credential, timeout, recipient, and label failures. Every case records the
+expected and observed outcome, provider calls, automatic retries, audit evidence, duration, and a
+safety verdict.
+
+The absolute gate requires all scenarios to match their contract, no unexpected provider call,
+zero automatic retries, retained failure evidence, and no unsafe effect. Ambiguous POST outcomes
+become `UNKNOWN`; durable `EXECUTING` claims require reconciliation; neither is replayed. The
+runner uses an isolated SQLite database per scenario and removes its database, WAL, and shared-memory
+artifacts afterward. `run_failure_evaluation.py` reports human-readable or JSON results and exits
+nonzero on any safety failure. The current deterministic reference run passes 24 of 24 scenarios.
 
 ## Scope
 

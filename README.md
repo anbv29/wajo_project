@@ -55,6 +55,7 @@ The frozen synthetic evaluation pack can be validated without a model key or mai
 ```powershell
 uv run python scripts/check_datasets.py
 uv run python scripts/run_evaluation.py
+uv run python scripts/run_failure_evaluation.py
 ```
 
 See `data/evaluation/README.md` for its splits, labels, governance, and limitations. Regeneration is

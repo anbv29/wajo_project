@@ -41,6 +41,10 @@ def main() -> int:
             "development_evaluation",
             (python, str(root / "scripts" / "run_evaluation.py")),
         ),
+        (
+            "failure_evaluation",
+            (python, str(root / "scripts" / "run_failure_evaluation.py")),
+        ),
     )
     for name, command in commands:
         print(f"Running gate: {name}", flush=True)

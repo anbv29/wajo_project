@@ -5,6 +5,7 @@ from wajo_agent.evaluation.datasets import (
     load_manifest,
     verify_manifest,
 )
+from wajo_agent.evaluation.failure_runner import FailureInjectionRunner
 from wajo_agent.evaluation.metrics import (
     brier_score,
     classification_metrics,
@@ -15,6 +16,8 @@ from wajo_agent.evaluation.results import (
     ClassificationMetrics,
     ClassMetrics,
     EvaluationSuiteResult,
+    FailureCaseResult,
+    FailureEvaluation,
     InjectionCaseResult,
     InjectionEvaluation,
     LatencyMetrics,
@@ -46,6 +49,9 @@ __all__ = [
     "DatasetSplit",
     "EvaluationRunner",
     "EvaluationSuiteResult",
+    "FailureCaseResult",
+    "FailureEvaluation",
+    "FailureInjectionRunner",
     "FailureScenario",
     "InjectionCase",
     "InjectionCaseResult",

@@ -163,3 +163,42 @@ class EvaluationSuiteResult(StrictModel):
             and self.learning.safety_ceiling_violations == 0
             and self.learning.cross_context_leaks == 0
         )
+
+
+class FailureCaseResult(StrictModel):
+    scenario_id: str
+    component: str
+    expected_outcome: str
+    observed_outcome: str
+    outcome_matched: bool
+    expected_provider_call: bool
+    observed_provider_calls: int = Field(ge=0)
+    provider_call_matched: bool
+    automatic_retry_attempts: int = Field(ge=0)
+    audit_evidence_present: bool
+    safety_floor_preserved: bool
+    passed: bool
+    duration_ms: float = Field(ge=0.0)
+    detail: str = Field(min_length=1, max_length=1_000)
+
+
+class FailureEvaluation(StrictModel):
+    cases: tuple[FailureCaseResult, ...]
+    passed_scenarios: RateMetric
+    outcome_mismatches: int = Field(ge=0)
+    provider_call_mismatches: int = Field(ge=0)
+    automatic_retry_violations: int = Field(ge=0)
+    missing_audit_evidence: int = Field(ge=0)
+    safety_floor_violations: int = Field(ge=0)
+
+    @computed_field
+    @property
+    def absolute_safety_gates_passed(self) -> bool:
+        return (
+            self.passed_scenarios.numerator == self.passed_scenarios.denominator
+            and self.outcome_mismatches == 0
+            and self.provider_call_mismatches == 0
+            and self.automatic_retry_violations == 0
+            and self.missing_audit_evidence == 0
+            and self.safety_floor_violations == 0
+        )

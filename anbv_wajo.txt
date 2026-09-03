@@ -1814,69 +1814,151 @@ harness records repetitions, errors, raw case IDs, confusion counts, and latency
 What remains separate
 ---------------------
 
-Step 23 scores normal, adversarial, and learning behavior and supplies the complete quality-gate
-command. Step 24 will connect the failure contracts to active fault injectors. Step 25 will persist
+Step 23 scores normal, adversarial, and learning behavior and supplies the main quality-gate
+command. Step 24 connects the failure contracts to active fault injectors. Step 25 will persist
 versioned JSON and Markdown reports, reproducibility metadata, confidence intervals, and charts.
 
 
 24. FAILURE-INJECTION TESTING
 =============================
 
-Failures are created intentionally, not merely waited for.
+What I built in this step
+-------------------------
 
-Planner failures:
+In Step 22 we wrote 24 failure contracts in data/evaluation/failures.jsonl. A contract says, for
+example, "if Gmail times out after a POST, the final state must be UNKNOWN and the request must not
+be retried." A written contract alone proves nothing. In this step I built code that deliberately
+creates each fault, sends it through the real application service, and checks the observed result.
 
-- network timeout
-- rate limit
-- invalid JSON
-- valid JSON with missing fields
-- unknown action type
-- payload that violates its action schema
-- conflicting intent and payload
+src/wajo_agent/evaluation/failure_runner.py contains FailureInjectionRunner. It first verifies the
+frozen dataset manifest. It then compares the failure IDs in the dataset with its injector registry.
+The two sets must be exactly equal. Therefore, a declared scenario can never quietly remain an
+unimplemented checkbox, and an unreviewed injector cannot quietly run outside the benchmark.
 
-Expected result: no execution; append a failure event; return ESCALATE or safe defer.
+Each injector is small and controlled, but it targets an actual production seam. For example, the
+planner double throws from the same plan() method used by ProactiveEmailAgent, the executor double
+returns through the same MailboxExecutor contract used by ExecutionService, and the feedback-store
+subclass fails during the same database transaction used by FeedbackService. The test is not a
+separate imitation of the agent.
 
-Approval failures:
+How one failure case flows
+--------------------------
 
-- recipient changed after approval
-- subject changed after approval
-- body changed after approval
-- proposal version changed
-- approval expired
-- approval replayed
-- approval used concurrently twice
+For each frozen failure row, the runner does the following:
 
-Expected result: no execution for the invalid attempt and an auditable denial reason.
+1. Create an isolated SQLite database and the minimum valid email, proposal, decision, or approval
+   state needed to reach the relevant boundary.
+2. Install one controlled fault, such as a timeout, tampered hash, failing audit append, or blocked
+   Gmail recipient.
+3. Invoke the real agent or application service.
+4. Observe the returned state and re-read durable database state.
+5. Count provider calls and automatic retries at the external-effect boundary.
+6. Confirm that failure evidence exists either in the application audit log or, when storage itself
+   is the failed boundary, in the structured harness result.
+7. Compare all observations with the frozen contract and mark the case PASS or FAIL.
+8. Close the store and remove that case's SQLite database, WAL, and shared-memory files.
 
-Execution failures:
+src/wajo_agent/evaluation/results.py defines strict FailureCaseResult and FailureEvaluation models.
+A case preserves its ID, category, expected and observed outcomes, provider-call count, retry count,
+audit-evidence status, safety status, duration, and an explanatory detail. The aggregate reports
+the number passed and exposes absolute_safety_gates_passed. This is much more useful to an
+interviewer than a single Boolean because a failed run shows exactly which guarantee broke.
 
-- crash before EXECUTING is committed
-- crash after EXECUTING but before adapter call
-- adapter fails before applying an effect
-- adapter applies external effect but response is lost
-- crash after provider success but before local success record
-- duplicate processing of the incoming email
+The active scenarios
+--------------------
 
-Expected result depends on certainty. Safe known failures become FAILED_SAFE. Ambiguous external results become UNKNOWN and are not automatically repeated.
+Planner and orchestration:
 
-Learning failures:
+- A planner timeout is caught by the agent. The agent records the failure, returns ESCALATE, and
+  never reaches an executor.
+- Invalid planner schema is rejected before policy or execution.
+- A syntactically valid payment action is rejected because it is not in the request's action
+  allowlist. An LLM cannot invent authority by emitting convincing JSON.
+- Duplicate webhook delivery returns the already-completed run and does not plan or execute twice.
+- Failure to claim the incoming message stops processing before planning and execution.
 
-- duplicate approval event
-- duplicate rejection event
-- projection update interrupted
-- restart before projection update
-- out-of-order feedback
+Approval integrity:
 
-Expected result: each explicit feedback changes evidence exactly once; the event log permits reconstruction; no silent corruption.
+- An expired approval is refused.
+- A consumed approval cannot be replayed.
+- Payload tampering changes the canonical hash and is refused.
+- A proposal-version mismatch is refused.
+- Two stale workers attempting the same approval produce one winner through SQLite compare-and-set;
+  the loser cannot perform another effect.
 
-Storage failures:
+Execution and crash recovery:
 
-- locked SQLite database
-- constraint violation
-- malformed stored event
-- transaction rollback
+- A certified pre-effect executor failure becomes FAILED_SAFE because the provider guarantees that
+  no external change happened.
+- An executor timeout becomes UNKNOWN because the request may have succeeded before the response
+  was lost. The agent does not guess and does not retry.
+- A response carrying the wrong command identity becomes UNKNOWN instead of being trusted.
+- A simulated process crash immediately after the durable EXECUTING claim leaves that claim in the
+  database. A later attempt sees it and requires reconciliation; it does not call the provider.
+- A duplicate successful execution returns the original durable result with zero new provider
+  calls.
 
-Expected result: no side effect starts unless required local safety and audit state is durably recorded. The CLI communicates the safe failure clearly.
+Learning and audit consistency:
+
+- Duplicate feedback with the same semantic evidence key changes the Beta evidence only once.
+- Feedback without the required approval or execution evidence is rejected.
+- An injected audit-write error occurs inside the feedback transaction. The receipt, preference
+  projection, and events all roll back together, so no half-learned preference survives.
+- Opening a database whose schema version is newer than this application is refused.
+- A direct SQL UPDATE against audit_events is rejected by the database trigger, proving that the
+  log is append-only below the Python repository layer.
+
+Gmail boundary:
+
+- A missing OAuth token fails before any HTTP provider request.
+- A timeout after a mutating POST becomes UNKNOWN with exactly one provider call and zero retries.
+- An outbound recipient outside the configured allowlist fails before a provider call.
+- A logical label that has no configured Gmail label ID fails before a provider call.
+
+Why UNKNOWN is essential
+------------------------
+
+FAILED_SAFE and UNKNOWN are deliberately different. FAILED_SAFE means there is reliable evidence
+that no external effect occurred, so a human may decide what to do next. UNKNOWN means the effect
+may already have occurred. Automatically repeating an UNKNOWN send, archive, or mutation could
+duplicate an irreversible action. The safety rule is therefore simple: record it, surface it, and
+require reconciliation; never automatically replay it.
+
+How to run it
+-------------
+
+The interviewer-readable run is:
+
+    uv run python scripts/run_failure_evaluation.py
+
+The complete structured result is available with:
+
+    uv run python scripts/run_failure_evaluation.py --json
+
+Pytest also contains tests/test_failure_injection.py, which requires exactly 24 passing cases, zero
+provider-call mismatches, zero retry violations, zero missing-evidence cases, zero safety violations,
+and specific critical outcomes such as UNKNOWN after a Gmail POST timeout. The main
+scripts/run_quality_gates.py command now includes this active failure evaluation as a required gate.
+
+Measured result in this repository
+----------------------------------
+
+The current deterministic run produces:
+
+    failure scenarios                   24 / 24 PASS
+    unexpected provider calls            0
+    automatic retry violations            0
+    missing audit evidence                 0
+    unsafe-effect violations               0
+    absolute failure-safety gates        PASS
+
+This proves the listed faults against the current implementation. It does not prove that every
+possible real-world outage has been imagined, and it is not a substitute for production chaos
+testing or Gmail sandbox tests. Its value is repeatability: every important failure mode promised
+in the take-home has an executable, reviewable regression test.
+
+Step 24 is now complete. Step 25 has not been started; it will persist versioned JSON and Markdown
+reports, reproducibility metadata, confidence intervals, and charts from the evaluation results.
 
 
 25. METRICS AND REPORTS
